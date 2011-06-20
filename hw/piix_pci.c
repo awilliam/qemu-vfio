@@ -78,6 +78,7 @@ struct PCII440FXState {
 #define I440FX_SMRAM    0x72
 
 static void piix3_set_irq(void *opaque, int pirq, int level);
+static int piix3_get_irq(void *opaque, int pirq);
 
 /* return the global irq number corresponding to a given device irq
    pin. We could also use the bus number to have a more precise
@@ -289,8 +290,8 @@ PCIBus *i440fx_init(PCII440FXState **pi440fx_state, int *piix3_devfn,
     PCIBus *b;
 
     b = i440fx_common_init("i440FX", pi440fx_state, piix3_devfn, pic, ram_size);
-    pci_bus_irqs(b, piix3_set_irq, pci_slot_get_pirq, (*pi440fx_state)->piix3,
-                 PIIX_NUM_PIRQS);
+    pci_bus_irqs(b, piix3_set_irq, piix3_get_irq, pci_slot_get_pirq,
+                 (*pi440fx_state)->piix3, PIIX_NUM_PIRQS);
 
     return b;
 }
@@ -301,7 +302,7 @@ PCIBus *i440fx_xen_init(PCII440FXState **pi440fx_state, int *piix3_devfn,
     PCIBus *b;
 
     b = i440fx_common_init("i440FX-xen", pi440fx_state, piix3_devfn, pic, ram_size);
-    pci_bus_irqs(b, xen_piix3_set_irq, xen_pci_slot_get_pirq,
+    pci_bus_irqs(b, xen_piix3_set_irq, NULL, xen_pci_slot_get_pirq,
                  (*pi440fx_state)->piix3, PIIX_NUM_PIRQS);
 
     return b;
@@ -362,7 +363,15 @@ static void piix3_write_config(PCIDevice *dev,
         for (pic_irq = 0; pic_irq < PIIX_NUM_PIC_IRQS; pic_irq++) {
             piix3_set_irq_pic(piix3, pic_irq);
         }
+        pci_bus_update_irqs(dev->bus);
     }
+}
+
+static int piix3_get_irq(void *opaque, int irq_num)
+{
+    PIIX3State *piix3 = opaque;
+
+    return piix3->dev.config[PIIX_PIRQC + irq_num];
 }
 
 static void piix3_reset(void *opaque)
@@ -403,6 +412,7 @@ static void piix3_reset(void *opaque)
     pci_conf[0xae] = 0x00;
 
     d->pic_levels = 0;
+    pci_bus_update_irqs(d->dev.bus);
 }
 
 static int piix3_post_load(void *opaque, int version_id)

@@ -126,7 +126,7 @@ static int sh_pci_init_device(SysBusDevice *dev)
         sysbus_init_irq(dev, &s->irq[i]);
     }
     s->bus = pci_register_bus(&s->busdev.qdev, "pci",
-                              sh_pci_set_irq, sh_pci_map_irq,
+                              sh_pci_set_irq, NULL, sh_pci_map_irq,
                               s->irq, PCI_DEVFN(0, 0), 4);
     s->memconfig = cpu_register_io_memory(sh_pci_reg.r, sh_pci_reg.w,
                                           s, DEVICE_NATIVE_ENDIAN);
