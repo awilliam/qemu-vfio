@@ -773,7 +773,7 @@ PCIBus *bonito_init(qemu_irq *pic)
     dev = qdev_create(NULL, "Bonito-pcihost");
     pcihost = FROM_SYSBUS(BonitoState, sysbus_from_qdev(dev));
     b = pci_register_bus(&pcihost->busdev.qdev, "pci", pci_bonito_set_irq,
-                         pci_bonito_map_irq, pic, 0x28, 32);
+                         NULL, pci_bonito_map_irq, pic, 0x28, 32);
     pcihost->bus = b;
     qdev_init_nofail(dev);
 
