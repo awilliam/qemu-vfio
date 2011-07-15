@@ -205,6 +205,9 @@ void pci_register_bar(PCIDevice *pci_dev, int region_num,
 void pci_register_bar_simple(PCIDevice *pci_dev, int region_num,
                              pcibus_t size, uint8_t attr, ram_addr_t ram_addr);
 
+void pci_map_option_rom(PCIDevice *pdev, int region_num, pcibus_t addr,
+                        pcibus_t size, int type);
+
 int pci_add_capability(PCIDevice *pdev, uint8_t cap_id,
                        uint8_t offset, uint8_t size);
 
