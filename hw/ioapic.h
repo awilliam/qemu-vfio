@@ -16,5 +16,8 @@
  * You should have received a copy of the GNU Lesser General Public
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
+#include "notify.h"
 
 void ioapic_eoi_broadcast(int vector);
+void ioapic_add_gsi_eoi_notifier(Notifier *notify, uint32_t gsi);
+void ioapic_remove_gsi_eoi_notifier(Notifier *notify, uint32_t gsi);
