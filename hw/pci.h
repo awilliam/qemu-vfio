@@ -3,6 +3,7 @@
 
 #include "qemu-common.h"
 #include "qobject.h"
+#include "notify.h"
 
 #include "qdev.h"
 
@@ -220,8 +221,10 @@ void pci_default_write_config(PCIDevice *d,
                               uint32_t address, uint32_t val, int len);
 void pci_device_save(PCIDevice *s, QEMUFile *f);
 int pci_device_load(PCIDevice *s, QEMUFile *f);
+int pci_get_irq(PCIDevice *pci_dev, int pin);
 
 typedef void (*pci_set_irq_fn)(void *opaque, int irq_num, int level);
+typedef int (*pci_get_irq_fn)(void *opaque, int irq_num);
 typedef int (*pci_map_irq_fn)(PCIDevice *pci_dev, int irq_num);
 
 typedef enum {
@@ -235,13 +238,17 @@ typedef int (*pci_hotplug_fn)(DeviceState *qdev, PCIDevice *pci_dev,
 void pci_bus_new_inplace(PCIBus *bus, DeviceState *parent,
                          const char *name, uint8_t devfn_min);
 PCIBus *pci_bus_new(DeviceState *parent, const char *name, uint8_t devfn_min);
-void pci_bus_irqs(PCIBus *bus, pci_set_irq_fn set_irq, pci_map_irq_fn map_irq,
-                  void *irq_opaque, int nirq);
+void pci_bus_irqs(PCIBus *bus, pci_set_irq_fn set_irq, pci_get_irq_fn get_irq,
+                  pci_map_irq_fn map_irq, void *irq_opaque, int nirq);
 int pci_bus_get_irq_level(PCIBus *bus, int irq_num);
+void pci_add_irq_update_notifier(PCIDevice *d, Notifier *notify);
+void pci_remove_irq_update_notifier(PCIDevice *d, Notifier *notify);
+void pci_bus_update_irqs(PCIBus *bus);
 void pci_bus_hotplug(PCIBus *bus, pci_hotplug_fn hotplug, DeviceState *dev);
 PCIBus *pci_register_bus(DeviceState *parent, const char *name,
-                         pci_set_irq_fn set_irq, pci_map_irq_fn map_irq,
-                         void *irq_opaque, uint8_t devfn_min, int nirq);
+                         pci_set_irq_fn set_irq, pci_get_irq_fn get_irq,
+                         pci_map_irq_fn map_irq, void *irq_opaque,
+                         uint8_t devfn_min, int nirq);
 void pci_device_reset(PCIDevice *dev);
 void pci_bus_reset(PCIBus *bus);
 

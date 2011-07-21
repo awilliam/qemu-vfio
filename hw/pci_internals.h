@@ -18,6 +18,7 @@ struct PCIBus {
     BusState qbus;
     uint8_t devfn_min;
     pci_set_irq_fn set_irq;
+    pci_get_irq_fn get_irq;
     pci_map_irq_fn map_irq;
     pci_hotplug_fn hotplug;
     DeviceState *hotplug_qdev;
@@ -33,6 +34,7 @@ struct PCIBus {
        Keep a count of the number of devices with raised IRQs.  */
     int nirq;
     int *irq_count;
+    NotifierList irq_update_notifiers;
 };
 
 struct PCIBridge {

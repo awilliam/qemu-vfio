@@ -133,6 +133,23 @@ int pci_bus_get_irq_level(PCIBus *bus, int irq_num)
     return !!bus->irq_count[irq_num];
 }
 
+int pci_get_irq(PCIDevice *pci_dev, int pin)
+{
+    PCIBus *bus;
+    for (;;) {
+        if (!pci_dev)
+            return -ENOSYS;
+        bus = pci_dev->bus;
+        if (!bus)
+            return -ENOSYS;
+        pin = bus->map_irq(pci_dev, pin);
+        if (bus->get_irq)
+            break;
+        pci_dev = bus->parent_dev;
+    }
+    return bus->get_irq(bus->irq_opaque, pin);
+}
+
 /* Update interrupt status bit in config space on interrupt
  * state change. */
 static void pci_update_irq_status(PCIDevice *dev)
@@ -286,10 +303,11 @@ PCIBus *pci_bus_new(DeviceState *parent, const char *name, uint8_t devfn_min)
     return bus;
 }
 
-void pci_bus_irqs(PCIBus *bus, pci_set_irq_fn set_irq, pci_map_irq_fn map_irq,
-                  void *irq_opaque, int nirq)
+void pci_bus_irqs(PCIBus *bus, pci_set_irq_fn set_irq, pci_get_irq_fn get_irq,
+                  pci_map_irq_fn map_irq, void *irq_opaque, int nirq)
 {
     bus->set_irq = set_irq;
+    bus->get_irq = get_irq;
     bus->map_irq = map_irq;
     bus->irq_opaque = irq_opaque;
     bus->nirq = nirq;
@@ -309,13 +327,14 @@ void pci_bus_set_mem_base(PCIBus *bus, target_phys_addr_t base)
 }
 
 PCIBus *pci_register_bus(DeviceState *parent, const char *name,
-                         pci_set_irq_fn set_irq, pci_map_irq_fn map_irq,
-                         void *irq_opaque, uint8_t devfn_min, int nirq)
+                         pci_set_irq_fn set_irq, pci_get_irq_fn get_irq,
+                         pci_map_irq_fn map_irq, void *irq_opaque,
+                         uint8_t devfn_min, int nirq)
 {
     PCIBus *bus;
 
     bus = pci_bus_new(parent, name, devfn_min);
-    pci_bus_irqs(bus, set_irq, map_irq, irq_opaque, nirq);
+    pci_bus_irqs(bus, set_irq, get_irq, map_irq, irq_opaque, nirq);
     return bus;
 }
 
@@ -324,6 +343,27 @@ int pci_bus_num(PCIBus *s)
     if (!s->parent_dev)
         return 0;       /* pci host bridge */
     return s->parent_dev->config[PCI_SECONDARY_BUS];
+}
+
+void pci_add_irq_update_notifier(PCIDevice *d, Notifier *notify)
+{
+    notifier_list_add(&d->bus->irq_update_notifiers, notify);
+}
+
+void pci_remove_irq_update_notifier(PCIDevice *d, Notifier *notify)
+{
+    notifier_list_remove(&d->bus->irq_update_notifiers, notify);
+}
+
+void pci_bus_update_irqs(PCIBus *b)
+{
+    PCIBus *child;
+
+    notifier_list_notify(&b->irq_update_notifiers);
+
+    QLIST_FOREACH(child, &b->child, sibling) {
+        pci_bus_update_irqs(child);
+    }
 }
 
 static int get_pci_config_device(QEMUFile *f, void *pv, size_t size)

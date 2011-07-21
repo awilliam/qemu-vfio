@@ -288,8 +288,9 @@ static int e500_pcihost_initfn(SysBusDevice *dev)
         sysbus_init_irq(dev, &s->irq[i]);
     }
 
-    b = pci_register_bus(&s->pci_state.busdev.qdev, NULL, mpc85xx_pci_set_irq,
-                         mpc85xx_pci_map_irq, s->irq, PCI_DEVFN(0x11, 0), 4);
+    b = pci_register_bus(&s->pci_state.busdev.qdev, NULL,
+                         mpc85xx_pci_set_irq, NULL, mpc85xx_pci_map_irq,
+                         s->irq, PCI_DEVFN(0x11, 0), 4);
     s->pci_state.bus = b;
 
     pci_create_simple(b, 0, "e500-host-bridge");

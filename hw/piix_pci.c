@@ -79,6 +79,7 @@ struct PCII440FXState {
 #define I440FX_SMRAM    0x72
 
 static void piix3_set_irq(void *opaque, int pirq, int level);
+static int piix3_get_irq(void *opaque, int pirq);
 static void piix3_write_config_xen(PCIDevice *dev,
                                uint32_t address, uint32_t val, int len);
 
@@ -265,12 +266,12 @@ static PCIBus *i440fx_common_init(const char *device_name,
     if (xen_enabled()) {
         piix3 = DO_UPCAST(PIIX3State, dev,
                 pci_create_simple_multifunction(b, -1, true, "PIIX3-xen"));
-        pci_bus_irqs(b, xen_piix3_set_irq, xen_pci_slot_get_pirq,
+        pci_bus_irqs(b, xen_piix3_set_irq, NULL, xen_pci_slot_get_pirq,
                 piix3, XEN_PIIX_NUM_PIRQS);
     } else {
         piix3 = DO_UPCAST(PIIX3State, dev,
                 pci_create_simple_multifunction(b, -1, true, "PIIX3"));
-        pci_bus_irqs(b, piix3_set_irq, pci_slot_get_pirq, piix3,
+        pci_bus_irqs(b, piix3_set_irq, piix3_get_irq, pci_slot_get_pirq, piix3,
                 PIIX_NUM_PIRQS);
     }
     piix3->pic = pic;
@@ -351,6 +352,7 @@ static void piix3_write_config(PCIDevice *dev,
         for (pic_irq = 0; pic_irq < PIIX_NUM_PIC_IRQS; pic_irq++) {
             piix3_set_irq_pic(piix3, pic_irq);
         }
+        pci_bus_update_irqs(dev->bus);
     }
 }
 
@@ -359,6 +361,13 @@ static void piix3_write_config_xen(PCIDevice *dev,
 {
     xen_piix_pci_write_config_client(address, val, len);
     piix3_write_config(dev, address, val, len);
+}
+
+static int piix3_get_irq(void *opaque, int irq_num)
+{
+    PIIX3State *piix3 = opaque;
+
+    return piix3->dev.config[PIIX_PIRQC + irq_num];
 }
 
 static void piix3_reset(void *opaque)
@@ -399,6 +408,7 @@ static void piix3_reset(void *opaque)
     pci_conf[0xae] = 0x00;
 
     d->pic_levels = 0;
+    pci_bus_update_irqs(d->dev.bus);
 }
 
 static int piix3_post_load(void *opaque, int version_id)
