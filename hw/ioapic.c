@@ -91,6 +91,7 @@ struct IOAPICState {
     uint32_t irr;
     uint64_t ioredtbl[IOAPIC_NUM_PINS];
     uint32_t gsi_base;
+    NotifierList eoi_notifiers[IOAPIC_NUM_PINS];
 };
 
 static IOAPICState *ioapics[MAX_IOAPICS];
@@ -190,9 +191,49 @@ void ioapic_eoi_broadcast(int vector)
                 if (!(entry & IOAPIC_LVT_MASKED) && (s->irr & (1 << n))) {
                     ioapic_service(s);
                 }
+                notifier_list_notify(&s->eoi_notifiers[n]);
             }
         }
     }
+}
+
+static void ioapic_update_gsi_eoi_notifier(Notifier *notify, uint32_t gsi,
+                                           bool add)
+{
+    IOAPICState *s;
+    int i;
+
+    for (i = 0; i < MAX_IOAPICS; i++) {
+        uint32_t pin;
+
+        s = ioapics[i];
+        if (!s) {
+            continue;
+        }
+
+        pin = gsi - s->gsi_base;
+
+        if (pin >= IOAPIC_NUM_PINS) {
+            continue;
+        }
+
+        if (add) {
+            notifier_list_add(&s->eoi_notifiers[pin], notify);
+        } else {
+            notifier_list_remove(&s->eoi_notifiers[pin], notify);
+        }
+        return;
+    }
+}
+
+void ioapic_add_gsi_eoi_notifier(Notifier *notify, uint32_t gsi)
+{
+    ioapic_update_gsi_eoi_notifier(notify, gsi, true);
+}
+
+void ioapic_remove_gsi_eoi_notifier(Notifier *notify, uint32_t gsi)
+{
+    ioapic_update_gsi_eoi_notifier(notify, gsi, false);
 }
 
 static uint32_t ioapic_mem_readl(void *opaque, target_phys_addr_t addr)
@@ -324,7 +365,7 @@ static CPUWriteMemoryFunc * const ioapic_mem_write[3] = {
 static int ioapic_init1(SysBusDevice *dev)
 {
     IOAPICState *s = FROM_SYSBUS(IOAPICState, dev);
-    int io_memory;
+    int i, io_memory;
     static int ioapic_no;
 
     if (ioapic_no >= MAX_IOAPICS) {
@@ -339,6 +380,10 @@ static int ioapic_init1(SysBusDevice *dev)
     qdev_init_gpio_in(&dev->qdev, ioapic_set_irq, IOAPIC_NUM_PINS);
 
     ioapics[ioapic_no++] = s;
+
+    for (i = 0 ; i < IOAPIC_NUM_PINS; i++) {
+        notifier_list_init(&s->eoi_notifiers[i]);
+    }
 
     return 0;
 }
