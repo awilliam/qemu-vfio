@@ -131,6 +131,7 @@ linux_aio=""
 attr=""
 vhost_net=""
 xfs=""
+vfio=""
 
 gprof="no"
 debug_tcg="no"
@@ -743,6 +744,10 @@ for opt do
   ;;
   --enable-smartcard-nss) smartcard_nss="yes"
   ;;
+  --disable-vfio) vfio="no"
+  ;;
+  --enable-vfio) vfio="yes"
+  ;;
   *) echo "ERROR: unknown option $opt"; show_help="yes"
   ;;
   esac
@@ -1018,6 +1023,8 @@ echo "  --disable-smartcard      disable smartcard support"
 echo "  --enable-smartcard       enable smartcard support"
 echo "  --disable-smartcard-nss  disable smartcard nss support"
 echo "  --enable-smartcard-nss   enable smartcard nss support"
+echo "  --disable-vfio           disable vfio pci device assignement support"
+echo "  --enable-vfio            enable vfio pci device assignment support"
 echo ""
 echo "NOTE: The object files are built at the place where configure is launched"
 exit 1
@@ -1800,6 +1807,27 @@ EOF
     fi
     bluez="no"
   fi
+fi
+
+##########################################
+# vfio needs netlink, test for libnl
+
+if test "$vfio" != "no"; then
+  libnl="-lnl"
+  cat > $TMPC << EOF
+#include <netlink/netlink.h>
+int main(void) { nl_handle_alloc(); return 0; }
+EOF
+  if compile_prog "" "$libnl" ; then
+    libs_softmmu="$libnl $libs_softmmu"
+    vfio=yes
+  else
+    if test "$vfio" = "yes"; then
+      echo "NOTE: vfio requires libnl."
+      feature_not_found "vfio"
+    fi
+    vfio=no
+  fi  
 fi
 
 ##########################################
@@ -2618,6 +2646,7 @@ echo "rbd support       $rbd"
 echo "xfsctl support    $xfs"
 echo "nss used          $smartcard_nss"
 echo "OpenGL support    $opengl"
+echo "VFIO support      $vfio"
 
 if test $sdl_too_old = "yes"; then
 echo "-> Your SDL version is too old - please upgrade to have SDL support"
@@ -3238,6 +3267,12 @@ case "$target_arch2" in
       if test "$cpu" = "i386" -o "$cpu" = "x86_64"; then
           echo "CONFIG_XEN_MAPCACHE=y" >> $config_target_mak
       fi
+    fi
+esac
+case "$target_arch2" in
+  i386|x86_64)
+    if test "$vfio" = "yes" -a "$target_softmmu" = "yes" ; then
+      echo "CONFIG_VFIO=y" >> $config_target_mak
     fi
 esac
 case "$target_arch2" in
