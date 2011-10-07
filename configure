@@ -131,7 +131,7 @@ linux_aio=""
 attr=""
 vhost_net=""
 xfs=""
-vfio=""
+vfio_pci=""
 
 gprof="no"
 debug_tcg="no"
@@ -744,9 +744,9 @@ for opt do
   ;;
   --enable-smartcard-nss) smartcard_nss="yes"
   ;;
-  --disable-vfio) vfio="no"
+  --disable-vfio-pci) vfio_pci="no"
   ;;
-  --enable-vfio) vfio="yes"
+  --enable-vfio-pci) vfio_pci="yes"
   ;;
   *) echo "ERROR: unknown option $opt"; show_help="yes"
   ;;
@@ -1023,8 +1023,8 @@ echo "  --disable-smartcard      disable smartcard support"
 echo "  --enable-smartcard       enable smartcard support"
 echo "  --disable-smartcard-nss  disable smartcard nss support"
 echo "  --enable-smartcard-nss   enable smartcard nss support"
-echo "  --disable-vfio           disable vfio pci device assignement support"
-echo "  --enable-vfio            enable vfio pci device assignment support"
+echo "  --disable-vfio-pci       disable vfio pci device assignement support"
+echo "  --enable-vfio-pci        enable vfio pci device assignment support"
 echo ""
 echo "NOTE: The object files are built at the place where configure is launched"
 exit 1
@@ -1810,9 +1810,9 @@ EOF
 fi
 
 ##########################################
-# vfio needs netlink, test for libnl
+# vfio_pci needs netlink, test for libnl
 
-if test "$vfio" != "no"; then
+if test "$vfio_pci" != "no"; then
   libnl="-lnl"
   cat > $TMPC << EOF
 #include <netlink/netlink.h>
@@ -1820,13 +1820,13 @@ int main(void) { nl_handle_alloc(); return 0; }
 EOF
   if compile_prog "" "$libnl" ; then
     libs_softmmu="$libnl $libs_softmmu"
-    vfio=yes
+    vfio_pci=yes
   else
-    if test "$vfio" = "yes"; then
-      echo "NOTE: vfio requires libnl."
-      feature_not_found "vfio"
+    if test "$vfio_pci" = "yes"; then
+      echo "NOTE: vfio-pci requires libnl."
+      feature_not_found "vfio-pci"
     fi
-    vfio=no
+    vfio_pci=no
   fi  
 fi
 
@@ -2646,7 +2646,7 @@ echo "rbd support       $rbd"
 echo "xfsctl support    $xfs"
 echo "nss used          $smartcard_nss"
 echo "OpenGL support    $opengl"
-echo "VFIO support      $vfio"
+echo "VFIO PCI support  $vfio_pci"
 
 if test $sdl_too_old = "yes"; then
 echo "-> Your SDL version is too old - please upgrade to have SDL support"
@@ -3271,8 +3271,8 @@ case "$target_arch2" in
 esac
 case "$target_arch2" in
   i386|x86_64)
-    if test "$vfio" = "yes" -a "$target_softmmu" = "yes" ; then
-      echo "CONFIG_VFIO=y" >> $config_target_mak
+    if test "$vfio_pci" = "yes" -a "$target_softmmu" = "yes" ; then
+      echo "CONFIG_VFIO_PCI=y" >> $config_target_mak
     fi
 esac
 case "$target_arch2" in

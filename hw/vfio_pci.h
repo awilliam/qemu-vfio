@@ -26,7 +26,8 @@ typedef struct PCIResource {
     pcibus_t e_phys;             /* emulated base address */
     pcibus_t e_size;             /* emulated size of region in bytes */
     uint32_t msix_offset;
-    int vfiofd;                  /* see vfio_resource_read/write */
+    off_t offset;
+    int fd;                      /* see vfio_resource_read/write */
 } PCIResource;
 
 typedef struct INTx {
@@ -53,32 +54,43 @@ enum {
     INT_MSIX = 3,
 };
 
-typedef struct VFIOUIOMMU {
+struct VFIOGroup;
+
+typedef struct VFIOIOMMU {
     int fd;
-    bool opened; /* Did we open fd, or was it opened for us? */
     CPUPhysMemoryClient client;
-    QLIST_HEAD(, VFIODevice) vdevs;
-    QLIST_ENTRY(VFIOUIOMMU) next;
-} VFIOUIOMMU;
+    QLIST_HEAD(, VFIOGroup) group_list;
+} VFIOIOMMU;
 
 typedef struct VFIODevice {
     PCIDevice pdev;
-    int vfiofd;
+    int fd;
     INTx intx;
+    unsigned int config_size;
+    off_t config_offset;
+    unsigned int rom_size;
+    off_t rom_offset;
     int msi_cap_size;
     MSIVector *msi_vectors;
     int nr_vectors;
     int interrupt;
     PCIResource resources[PCI_NUM_REGIONS - 1]; /* No ROM */
     PCIHostDevice host;
-    VFIOUIOMMU *uiommu;
-    QLIST_ENTRY(VFIODevice) iommu_next;
-    QLIST_ENTRY(VFIODevice) nl_next;
+    QLIST_ENTRY(VFIODevice) group_next;
     QEMUTimer *remove_timer;
     uint32_t flags;
-    char *vfiofd_name;
-    char *uiommufd_name;
+    struct VFIOGroup *group;
+    bool reset_works;
 } VFIODevice;
+
+typedef struct VFIOGroup {
+    int fd;
+    unsigned int groupid;
+    VFIOIOMMU *iommu;
+    QLIST_HEAD(, VFIODevice) device_list;
+    QLIST_ENTRY(VFIOGroup) group_next;
+    QLIST_ENTRY(VFIOGroup) iommu_next;
+} VFIOGroup;
 
 /* We can either create a domain per device or a domain per guest using
  * the uiommu interface.  By default we set this bit true to share an
