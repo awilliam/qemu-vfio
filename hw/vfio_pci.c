@@ -1763,6 +1763,7 @@ out:
 static int vfio_exitfn(struct PCIDevice *pdev)
 {
     VFIODevice *vdev = DO_UPCAST(VFIODevice, pdev, pdev);
+    VFIOGroup *group = vdev->group;
 
     vfio_disable_interrupts(vdev);
     vfio_teardown_msi(vdev);
@@ -1770,9 +1771,9 @@ static int vfio_exitfn(struct PCIDevice *pdev)
 #if 0
     vfio_unregister_netlink(vdev);
 #endif
-    vfio_put_iommu(vdev->group);
+    vfio_put_iommu(group);
     vfio_put_device(vdev);
-    vfio_put_group(vdev->group);
+    vfio_put_group(group);
     return 0;
 }
 
