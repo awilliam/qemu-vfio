@@ -1261,7 +1261,6 @@ static int vfio_get_iommu(VFIOGroup *group)
     group->iommu->client.set_memory = vfio_client_set_memory;
     group->iommu->client.sync_dirty_bitmap = vfio_client_sync_dirty_bitmap;
     group->iommu->client.migration_log = vfio_client_migration_log;
-    DPRINTF("%s() Registering phys memory client\n", __FUNCTION__);
     cpu_register_phys_memory_client(&group->iommu->client);
 
     return 0;
@@ -1279,7 +1278,7 @@ static void vfio_put_iommu(VFIOGroup *group)
 
 static int vfio_initfn(struct PCIDevice *pdev)
 {
-    VFIODevice *vdev = DO_UPCAST(VFIODevice, pdev, pdev);
+    VFIODevice *pvdev, *vdev = DO_UPCAST(VFIODevice, pdev, pdev);
     VFIOGroup *group, *mgroup;
     char path[64];
     struct stat st;
@@ -1321,6 +1320,18 @@ static int vfio_initfn(struct PCIDevice *pdev)
     sprintf(path, "%04x:%02x:%02x.%01x",
             vdev->host.seg, vdev->host.bus, vdev->host.dev, vdev->host.func);
 
+    QLIST_FOREACH(pvdev, &group->device_list, group_next) {
+        if (pvdev->host.seg == vdev->host.seg &&
+            pvdev->host.bus == vdev->host.bus &&
+            pvdev->host.dev == vdev->host.dev &&
+            pvdev->host.func == vdev->host.func) {
+
+            error_report("vfio: error: device %s is already attached\n", path);
+            vfio_put_group(group);
+            return -1;
+        }
+    }
+
     ret = vfio_get_device(group, path, vdev);
     if (ret) {
         error_report("vfio: failed to get device %s", path);
@@ -1340,10 +1351,14 @@ static int vfio_initfn(struct PCIDevice *pdev)
                 continue;
             }
 
-            if (ioctl(mgroup->fd, VFIO_GROUP_MERGE, group->fd) == 0) {
+            ret = ioctl(mgroup->fd, VFIO_GROUP_MERGE, &group->fd);
+            if (ret == 0) {
                 DPRINTF("%s() merged with group %u\n", __FUNCTION__,
                         mgroup->groupid);
                 break;
+            } else {
+                DPRINTF("%s() attempted merge with group %u: %s (%d)\n",
+                        __FUNCTION__, mgroup->groupid, strerror(errno), errno);
             }
         }
 
