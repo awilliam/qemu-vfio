@@ -178,7 +178,7 @@ static const SpiceTabletInterface tablet_interface = {
     .buttons            = tablet_buttons,
 };
 
-static void mouse_mode_notifier(Notifier *notifier)
+static void mouse_mode_notifier(Notifier *notifier, void *data)
 {
     QemuSpicePointer *pointer = container_of(notifier, QemuSpicePointer, mouse_mode);
     bool is_absolute  = kbd_mouse_is_absolute();
@@ -200,12 +200,12 @@ void qemu_spice_input_init(void)
     QemuSpiceKbd *kbd;
     QemuSpicePointer *pointer;
 
-    kbd = qemu_mallocz(sizeof(*kbd));
+    kbd = g_malloc0(sizeof(*kbd));
     kbd->sin.base.sif = &kbd_interface.base;
     qemu_spice_add_interface(&kbd->sin.base);
     qemu_add_led_event_handler(kbd_leds, kbd);
 
-    pointer = qemu_mallocz(sizeof(*pointer));
+    pointer = g_malloc0(sizeof(*pointer));
     pointer->mouse.base.sif  = &mouse_interface.base;
     pointer->tablet.base.sif = &tablet_interface.base;
     qemu_spice_add_interface(&pointer->mouse.base);
@@ -213,5 +213,5 @@ void qemu_spice_input_init(void)
     pointer->absolute = false;
     pointer->mouse_mode.notify = mouse_mode_notifier;
     qemu_add_mouse_mode_change_notifier(&pointer->mouse_mode);
-    mouse_mode_notifier(&pointer->mouse_mode);
+    mouse_mode_notifier(&pointer->mouse_mode, NULL);
 }

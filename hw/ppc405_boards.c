@@ -32,6 +32,7 @@
 #include "qemu-log.h"
 #include "loader.h"
 #include "blockdev.h"
+#include "exec-memory.h"
 
 #define BIOS_FILENAME "ppc405_rom.bin"
 #define BIOS_SIZE (2048 * 1024)
@@ -162,7 +163,7 @@ static void ref405ep_fpga_init (uint32_t base)
     ref405ep_fpga_t *fpga;
     int fpga_memory;
 
-    fpga = qemu_mallocz(sizeof(ref405ep_fpga_t));
+    fpga = g_malloc0(sizeof(ref405ep_fpga_t));
     fpga_memory = cpu_register_io_memory(ref405ep_fpga_read,
                                          ref405ep_fpga_write, fpga,
                                          DEVICE_NATIVE_ENDIAN);
@@ -181,7 +182,9 @@ static void ref405ep_init (ram_addr_t ram_size,
     ppc4xx_bd_info_t bd;
     CPUPPCState *env;
     qemu_irq *pic;
-    ram_addr_t sram_offset, bios_offset, bdloc;
+    MemoryRegion *bios;
+    ram_addr_t sram_offset, bdloc;
+    MemoryRegion *ram_memories = g_malloc(2 * sizeof(*ram_memories));
     target_phys_addr_t ram_bases[2], ram_sizes[2];
     target_ulong sram_size;
     long bios_size;
@@ -194,21 +197,24 @@ static void ref405ep_init (ram_addr_t ram_size,
     DriveInfo *dinfo;
 
     /* XXX: fix this */
-    ram_bases[0] = qemu_ram_alloc(NULL, "ef405ep.ram", 0x08000000);
+    memory_region_init_ram(&ram_memories[0], NULL, "ef405ep.ram", 0x08000000);
+    ram_bases[0] = 0;
     ram_sizes[0] = 0x08000000;
+    memory_region_init(&ram_memories[1], "ef405ep.ram1", 0);
     ram_bases[1] = 0x00000000;
     ram_sizes[1] = 0x00000000;
     ram_size = 128 * 1024 * 1024;
 #ifdef DEBUG_BOARD_INIT
     printf("%s: register cpu\n", __func__);
 #endif
-    env = ppc405ep_init(ram_bases, ram_sizes, 33333333, &pic,
-                        kernel_filename == NULL ? 0 : 1);
+    env = ppc405ep_init(get_system_memory(), ram_memories, ram_bases, ram_sizes,
+                        33333333, &pic, kernel_filename == NULL ? 0 : 1);
     /* allocate SRAM */
     sram_size = 512 * 1024;
     sram_offset = qemu_ram_alloc(NULL, "ef405ep.sram", sram_size);
 #ifdef DEBUG_BOARD_INIT
-    printf("%s: register SRAM at offset %08lx\n", __func__, sram_offset);
+    printf("%s: register SRAM at offset " RAM_ADDR_FMT "\n",
+           __func__, sram_offset);
 #endif
     cpu_register_physical_memory(0xFFF00000, sram_size,
                                  sram_offset | IO_MEM_RAM);
@@ -221,15 +227,15 @@ static void ref405ep_init (ram_addr_t ram_size,
     dinfo = drive_get(IF_PFLASH, 0, fl_idx);
     if (dinfo) {
         bios_size = bdrv_getlength(dinfo->bdrv);
-        bios_offset = qemu_ram_alloc(NULL, "ef405ep.bios", bios_size);
         fl_sectors = (bios_size + 65535) >> 16;
 #ifdef DEBUG_BOARD_INIT
         printf("Register parallel flash %d size %lx"
-               " at offset %08lx addr %lx '%s' %d\n",
-               fl_idx, bios_size, bios_offset, -bios_size,
+               " at addr %lx '%s' %d\n",
+               fl_idx, bios_size, -bios_size,
                bdrv_get_device_name(dinfo->bdrv), fl_sectors);
 #endif
-        pflash_cfi02_register((uint32_t)(-bios_size), bios_offset,
+        pflash_cfi02_register((uint32_t)(-bios_size),
+                              NULL, "ef405ep.bios", bios_size,
                               dinfo->bdrv, 65536, fl_sectors, 1,
                               2, 0x0001, 0x22DA, 0x0000, 0x0000, 0x555, 0x2AA,
                               1);
@@ -240,13 +246,14 @@ static void ref405ep_init (ram_addr_t ram_size,
 #ifdef DEBUG_BOARD_INIT
         printf("Load BIOS from file\n");
 #endif
-        bios_offset = qemu_ram_alloc(NULL, "ef405ep.bios", BIOS_SIZE);
+        bios = g_new(MemoryRegion, 1);
+        memory_region_init_ram(bios, NULL, "ef405ep.bios", BIOS_SIZE);
         if (bios_name == NULL)
             bios_name = BIOS_FILENAME;
         filename = qemu_find_file(QEMU_FILE_TYPE_BIOS, bios_name);
         if (filename) {
-            bios_size = load_image(filename, qemu_get_ram_ptr(bios_offset));
-            qemu_free(filename);
+            bios_size = load_image(filename, memory_region_get_ram_ptr(bios));
+            g_free(filename);
         } else {
             bios_size = -1;
         }
@@ -256,8 +263,9 @@ static void ref405ep_init (ram_addr_t ram_size,
             exit(1);
         }
         bios_size = (bios_size + 0xfff) & ~0xfff;
-        cpu_register_physical_memory((uint32_t)(-bios_size),
-                                     bios_size, bios_offset | IO_MEM_ROM);
+        memory_region_set_readonly(bios, true);
+        memory_region_add_subregion(get_system_memory(),
+                                    (uint32_t)(-bios_size), bios);
     }
     /* Register FPGA */
 #ifdef DEBUG_BOARD_INIT
@@ -350,7 +358,7 @@ static void ref405ep_init (ram_addr_t ram_size,
 #ifdef DEBUG_BOARD_INIT
     printf("%s: Done\n", __func__);
 #endif
-    printf("bdloc %016lx\n", (unsigned long)bdloc);
+    printf("bdloc " RAM_ADDR_FMT "\n", bdloc);
 }
 
 static QEMUMachine ref405ep_machine = {
@@ -487,7 +495,7 @@ static void taihu_cpld_init (uint32_t base)
     taihu_cpld_t *cpld;
     int cpld_memory;
 
-    cpld = qemu_mallocz(sizeof(taihu_cpld_t));
+    cpld = g_malloc0(sizeof(taihu_cpld_t));
     cpld_memory = cpu_register_io_memory(taihu_cpld_read,
                                          taihu_cpld_write, cpld,
                                          DEVICE_NATIVE_ENDIAN);
@@ -504,7 +512,8 @@ static void taihu_405ep_init(ram_addr_t ram_size,
 {
     char *filename;
     qemu_irq *pic;
-    ram_addr_t bios_offset;
+    MemoryRegion *bios;
+    MemoryRegion *ram_memories = g_malloc(2 * sizeof(*ram_memories));
     target_phys_addr_t ram_bases[2], ram_sizes[2];
     long bios_size;
     target_ulong kernel_base, initrd_base;
@@ -514,16 +523,20 @@ static void taihu_405ep_init(ram_addr_t ram_size,
     DriveInfo *dinfo;
 
     /* RAM is soldered to the board so the size cannot be changed */
-    ram_bases[0] = qemu_ram_alloc(NULL, "taihu_405ep.ram-0", 0x04000000);
+    memory_region_init_ram(&ram_memories[0], NULL,
+                           "taihu_405ep.ram-0", 0x04000000);
+    ram_bases[0] = 0;
     ram_sizes[0] = 0x04000000;
-    ram_bases[1] = qemu_ram_alloc(NULL, "taihu_405ep.ram-1", 0x04000000);
+    memory_region_init_ram(&ram_memories[1], NULL,
+                           "taihu_405ep.ram-1", 0x04000000);
+    ram_bases[1] = 0x04000000;
     ram_sizes[1] = 0x04000000;
     ram_size = 0x08000000;
 #ifdef DEBUG_BOARD_INIT
     printf("%s: register cpu\n", __func__);
 #endif
-    ppc405ep_init(ram_bases, ram_sizes, 33333333, &pic,
-                  kernel_filename == NULL ? 0 : 1);
+    ppc405ep_init(get_system_memory(), ram_memories, ram_bases, ram_sizes,
+                  33333333, &pic, kernel_filename == NULL ? 0 : 1);
     /* allocate and load BIOS */
 #ifdef DEBUG_BOARD_INIT
     printf("%s: register BIOS\n", __func__);
@@ -536,14 +549,14 @@ static void taihu_405ep_init(ram_addr_t ram_size,
         /* XXX: should check that size is 2MB */
         //        bios_size = 2 * 1024 * 1024;
         fl_sectors = (bios_size + 65535) >> 16;
-        bios_offset = qemu_ram_alloc(NULL, "taihu_405ep.bios", bios_size);
 #ifdef DEBUG_BOARD_INIT
         printf("Register parallel flash %d size %lx"
-               " at offset %08lx addr %lx '%s' %d\n",
-               fl_idx, bios_size, bios_offset, -bios_size,
+               " at addr %lx '%s' %d\n",
+               fl_idx, bios_size, -bios_size,
                bdrv_get_device_name(dinfo->bdrv), fl_sectors);
 #endif
-        pflash_cfi02_register((uint32_t)(-bios_size), bios_offset,
+        pflash_cfi02_register((uint32_t)(-bios_size),
+                              NULL, "taihu_405ep.bios", bios_size,
                               dinfo->bdrv, 65536, fl_sectors, 1,
                               4, 0x0001, 0x22DA, 0x0000, 0x0000, 0x555, 0x2AA,
                               1);
@@ -556,11 +569,12 @@ static void taihu_405ep_init(ram_addr_t ram_size,
 #endif
         if (bios_name == NULL)
             bios_name = BIOS_FILENAME;
-        bios_offset = qemu_ram_alloc(NULL, "taihu_405ep.bios", BIOS_SIZE);
+        bios = g_new(MemoryRegion, 1);
+        memory_region_init_ram(bios, NULL, "taihu_405ep.bios", BIOS_SIZE);
         filename = qemu_find_file(QEMU_FILE_TYPE_BIOS, bios_name);
         if (filename) {
-            bios_size = load_image(filename, qemu_get_ram_ptr(bios_offset));
-            qemu_free(filename);
+            bios_size = load_image(filename, memory_region_get_ram_ptr(bios));
+            g_free(filename);
         } else {
             bios_size = -1;
         }
@@ -570,8 +584,9 @@ static void taihu_405ep_init(ram_addr_t ram_size,
             exit(1);
         }
         bios_size = (bios_size + 0xfff) & ~0xfff;
-        cpu_register_physical_memory((uint32_t)(-bios_size),
-                                     bios_size, bios_offset | IO_MEM_ROM);
+        memory_region_set_readonly(bios, true);
+        memory_region_add_subregion(get_system_memory(), (uint32_t)(-bios_size),
+                                    bios);
     }
     /* Register Linux flash */
     dinfo = drive_get(IF_PFLASH, 0, fl_idx);
@@ -582,12 +597,11 @@ static void taihu_405ep_init(ram_addr_t ram_size,
         fl_sectors = (bios_size + 65535) >> 16;
 #ifdef DEBUG_BOARD_INIT
         printf("Register parallel flash %d size %lx"
-               " at offset %08lx  addr " TARGET_FMT_lx " '%s'\n",
-               fl_idx, bios_size, bios_offset, (target_ulong)0xfc000000,
+               " at addr " TARGET_FMT_lx " '%s'\n",
+               fl_idx, bios_size, (target_ulong)0xfc000000,
                bdrv_get_device_name(dinfo->bdrv));
 #endif
-        bios_offset = qemu_ram_alloc(NULL, "taihu_405ep.flash", bios_size);
-        pflash_cfi02_register(0xfc000000, bios_offset,
+        pflash_cfi02_register(0xfc000000, NULL, "taihu_405ep.flash", bios_size,
                               dinfo->bdrv, 65536, fl_sectors, 1,
                               4, 0x0001, 0x22DA, 0x0000, 0x0000, 0x555, 0x2AA,
                               1);

@@ -38,7 +38,9 @@
 #include "elf.h"
 #include "blockdev.h"
 #include "pc.h"
+#include "exec-memory.h"
 
+#include "microblaze_pic_cpu.h"
 #include "xilinx_axidma.h"
 
 #define LMB_BRAM_SIZE  (128 * 1024)
@@ -88,7 +90,7 @@ static int petalogix_load_device_tree(target_phys_addr_t addr,
         path = qemu_find_file(QEMU_FILE_TYPE_BIOS, BINARY_DEVICE_TREE_FILE);
         if (path) {
             fdt = load_device_tree(path, &fdt_size);
-            qemu_free(path);
+            g_free(path);
         }
         if (!fdt) {
             return 0;
@@ -108,7 +110,7 @@ static int petalogix_load_device_tree(target_phys_addr_t addr,
         path = qemu_find_file(QEMU_FILE_TYPE_BIOS, BINARY_DEVICE_TREE_FILE);
         if (path) {
             fdt_size = load_image_targphys(path, addr, 0x10000);
-            qemu_free(path);
+            g_free(path);
         }
     }
 
@@ -140,6 +142,7 @@ petalogix_ml605_init(ram_addr_t ram_size,
                           const char *kernel_cmdline,
                           const char *initrd_filename, const char *cpu_model)
 {
+    MemoryRegion *address_space_mem = get_system_memory();
     DeviceState *dev;
     CPUState *env;
     int kernel_size;
@@ -148,7 +151,6 @@ petalogix_ml605_init(ram_addr_t ram_size,
     target_phys_addr_t ddr_base = MEMORY_BASEADDR;
     ram_addr_t phys_lmb_bram;
     ram_addr_t phys_ram;
-    ram_addr_t phys_flash;
     qemu_irq irq[32], *cpu_irq;
 
     /* init CPUs */
@@ -168,11 +170,11 @@ petalogix_ml605_init(ram_addr_t ram_size,
     phys_ram = qemu_ram_alloc(NULL, "petalogix_ml605.ram", ram_size);
     cpu_register_physical_memory(ddr_base, ram_size, phys_ram | IO_MEM_RAM);
 
-    phys_flash = qemu_ram_alloc(NULL, "petalogix_ml605.flash", FLASH_SIZE);
     dinfo = drive_get(IF_PFLASH, 0, 0);
     /* 5th parameter 2 means bank-width
      * 10th paremeter 0 means little-endian */
-    pflash_cfi01_register(FLASH_BASEADDR, phys_flash,
+    pflash_cfi01_register(FLASH_BASEADDR,
+                          NULL, "petalogix_ml605.flash", FLASH_SIZE,
                           dinfo ? dinfo->bdrv : NULL, (64 * 1024),
                           FLASH_SIZE >> 16,
                           2, 0x89, 0x18, 0x0000, 0x0, 0);
@@ -184,8 +186,8 @@ petalogix_ml605_init(ram_addr_t ram_size,
         irq[i] = qdev_get_gpio_in(dev, i);
     }
 
-    serial_mm_init(UART16550_BASEADDR + 0x1000, 2, irq[5], 115200,
-                   serial_hds[0], 1, 0);
+    serial_mm_init(address_space_mem, UART16550_BASEADDR + 0x1000, 2,
+                   irq[5], 115200, serial_hds[0], DEVICE_LITTLE_ENDIAN);
 
     /* 2 timers at irq 2 @ 100 Mhz.  */
     xilinx_timer_create(TIMER_BASEADDR, irq[2], 2, 100 * 1000000);

@@ -18,7 +18,8 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "exec.h"
+#include "cpu.h"
+#include "dyngen-exec.h"
 #include "host-utils.h"
 #include "helpers.h"
 #include <string.h>
@@ -31,6 +32,7 @@
 /*****************************************************************************/
 /* Softmmu support */
 #if !defined (CONFIG_USER_ONLY)
+#include "softmmu_exec.h"
 
 #define MMUSUFFIX _mmu
 
@@ -50,18 +52,17 @@
    NULL, it means that the function was called in C code (i.e. not
    from generated code or from helper.c) */
 /* XXX: fix it to restore all registers */
-void tlb_fill (target_ulong addr, int is_write, int mmu_idx, void *retaddr)
+void tlb_fill(CPUState *env1, target_ulong addr, int is_write, int mmu_idx,
+              void *retaddr)
 {
     TranslationBlock *tb;
     CPUState *saved_env;
     unsigned long pc;
     int ret;
 
-    /* XXX: hack to restore env in all cases, even if not called from
-       generated code */
     saved_env = env;
-    env = cpu_single_env;
-    ret = cpu_s390x_handle_mmu_fault(env, addr, is_write, mmu_idx, 1);
+    env = env1;
+    ret = cpu_s390x_handle_mmu_fault(env, addr, is_write, mmu_idx);
     if (unlikely(ret != 0)) {
         if (likely(retaddr)) {
             /* now we have a real cpu fault */

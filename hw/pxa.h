@@ -4,10 +4,12 @@
  * Copyright (c) 2006 Openedhand Ltd.
  * Written by Andrzej Zaborowski <balrog@zabor.org>
  *
- * This code is licenced under the GNU GPL v2.
+ * This code is licensed under the GNU GPL v2.
  */
 #ifndef PXA_H
 # define PXA_H			"pxa.h"
+
+#include "memory.h"
 
 /* Interrupt numbers */
 # define PXA2XX_PIC_SSP3	0
@@ -173,7 +175,8 @@ struct PXA2xxI2SState {
 # define PA_FMT			"0x%08lx"
 # define REG_FMT		"0x" TARGET_FMT_plx
 
-PXA2xxState *pxa270_init(unsigned int sdram_size, const char *revision);
-PXA2xxState *pxa255_init(unsigned int sdram_size);
+PXA2xxState *pxa270_init(MemoryRegion *address_space, unsigned int sdram_size,
+                         const char *revision);
+PXA2xxState *pxa255_init(MemoryRegion *address_space, unsigned int sdram_size);
 
 #endif	/* PXA_H */

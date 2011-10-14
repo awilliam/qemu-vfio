@@ -60,7 +60,7 @@ int __clone2(int (*fn)(void *), void *child_stack_base,
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
 #include <linux/wireless.h>
-#include <qemu-common.h>
+#include "qemu-common.h"
 #ifdef TARGET_GPROF
 #include <sys/gmon.h>
 #endif
@@ -69,6 +69,9 @@ int __clone2(int (*fn)(void *), void *child_stack_base,
 #endif
 #ifdef CONFIG_EPOLL
 #include <sys/epoll.h>
+#endif
+#ifdef CONFIG_ATTR
+#include <attr/xattr.h>
 #endif
 
 #define termios host_termios
@@ -96,7 +99,6 @@ int __clone2(int (*fn)(void *), void *child_stack_base,
 #include "cpu-uname.h"
 
 #include "qemu.h"
-#include "qemu-common.h"
 
 #if defined(CONFIG_USE_NPTL)
 #define CLONE_NPTL_FLAGS2 (CLONE_SETTLS | \
@@ -797,6 +799,15 @@ abi_long do_brk(abi_ulong new_brk)
                                         MAP_ANON|MAP_PRIVATE, 0, 0));
 
     if (mapped_addr == brk_page) {
+        /* Heap contents are initialized to zero, as for anonymous
+         * mapped pages.  Technically the new pages are already
+         * initialized to zero since they *are* anonymous mapped
+         * pages, however we have to take care with the contents that
+         * come from the remaining part of the previous page: it may
+         * contains garbage data due to a previous heap usage (grown
+         * then shrunken).  */
+        memset(g2h(target_brk), 0, brk_page - target_brk);
+
         target_brk = new_brk;
         brk_page = HOST_PAGE_ALIGN(target_brk);
         DEBUGF_BRK("%#010x (mapped_addr == brk_page)\n", target_brk);
@@ -1505,7 +1516,7 @@ static abi_long do_setsockopt(int sockfd, int level, int optname,
         break;
     default:
     unimplemented:
-        gemu_log("Unsupported setsockopt level=%d optname=%d \n", level, optname);
+        gemu_log("Unsupported setsockopt level=%d optname=%d\n", level, optname);
         ret = -TARGET_ENOPROTOOPT;
     }
     return ret;
@@ -2004,7 +2015,7 @@ static abi_long do_recvfrom(int fd, abi_ulong msg, size_t len, int flags,
         ret = get_errno(recvfrom(fd, host_msg, len, flags, addr, &addrlen));
     } else {
         addr = NULL; /* To keep compiler quiet.  */
-        ret = get_errno(recv(fd, host_msg, len, flags));
+        ret = get_errno(qemu_recv(fd, host_msg, len, flags));
     }
     if (!is_error(ret)) {
         if (target_addr) {
@@ -3991,7 +4002,7 @@ static int do_fork(CPUState *env, unsigned int flags, abi_ulong newsp,
         new_thread_info info;
         pthread_attr_t attr;
 #endif
-        ts = qemu_mallocz(sizeof(TaskState));
+        ts = g_malloc0(sizeof(TaskState));
         init_task_state(ts);
         /* we create a new CPU instance. */
         new_env = cpu_copy(env);
@@ -4057,7 +4068,7 @@ static int do_fork(CPUState *env, unsigned int flags, abi_ulong newsp,
         if (flags & CLONE_NPTL_FLAGS2)
             return -EINVAL;
         /* This is probably going to die very quickly, but do it anyway.  */
-        new_stack = qemu_mallocz (NEW_STACK_SIZE);
+        new_stack = g_malloc0 (NEW_STACK_SIZE);
 #ifdef __ia64__
         ret = __clone2(clone_func, new_stack, NEW_STACK_SIZE, flags, new_env);
 #else
@@ -4651,8 +4662,8 @@ abi_long do_syscall(void *cpu_env, int num, abi_long arg1,
                         NULL, NULL, 0);
           }
           thread_env = NULL;
-          qemu_free(cpu_env);
-          qemu_free(ts);
+          g_free(cpu_env);
+          g_free(ts);
           pthread_exit(NULL);
       }
 #endif
@@ -7633,22 +7644,67 @@ abi_long do_syscall(void *cpu_env, int num, abi_long arg1,
 #endif
         break;
 #endif
+#ifdef CONFIG_ATTR
 #ifdef TARGET_NR_setxattr
-    case TARGET_NR_setxattr:
     case TARGET_NR_lsetxattr:
     case TARGET_NR_fsetxattr:
-    case TARGET_NR_getxattr:
     case TARGET_NR_lgetxattr:
     case TARGET_NR_fgetxattr:
     case TARGET_NR_listxattr:
     case TARGET_NR_llistxattr:
     case TARGET_NR_flistxattr:
-    case TARGET_NR_removexattr:
     case TARGET_NR_lremovexattr:
     case TARGET_NR_fremovexattr:
         ret = -TARGET_EOPNOTSUPP;
         break;
+    case TARGET_NR_setxattr:
+        {
+            void *p, *n, *v;
+            p = lock_user_string(arg1);
+            n = lock_user_string(arg2);
+            v = lock_user(VERIFY_READ, arg3, arg4, 1);
+            if (p && n && v) {
+                ret = get_errno(setxattr(p, n, v, arg4, arg5));
+            } else {
+                ret = -TARGET_EFAULT;
+            }
+            unlock_user(p, arg1, 0);
+            unlock_user(n, arg2, 0);
+            unlock_user(v, arg3, 0);
+        }
+        break;
+    case TARGET_NR_getxattr:
+        {
+            void *p, *n, *v;
+            p = lock_user_string(arg1);
+            n = lock_user_string(arg2);
+            v = lock_user(VERIFY_WRITE, arg3, arg4, 0);
+            if (p && n && v) {
+                ret = get_errno(getxattr(p, n, v, arg4));
+            } else {
+                ret = -TARGET_EFAULT;
+            }
+            unlock_user(p, arg1, 0);
+            unlock_user(n, arg2, 0);
+            unlock_user(v, arg3, arg4);
+        }
+        break;
+    case TARGET_NR_removexattr:
+        {
+            void *p, *n;
+            p = lock_user_string(arg1);
+            n = lock_user_string(arg2);
+            if (p && n) {
+                ret = get_errno(removexattr(p, n));
+            } else {
+                ret = -TARGET_EFAULT;
+            }
+            unlock_user(p, arg1, 0);
+            unlock_user(n, arg2, 0);
+        }
+        break;
 #endif
+#endif /* CONFIG_ATTR */
 #ifdef TARGET_NR_set_thread_area
     case TARGET_NR_set_thread_area:
 #if defined(TARGET_MIPS)

@@ -4,12 +4,14 @@
  * Copyright (c) 2006 CodeSourcery.
  * Written by Paul Brook
  *
- * This code is licenced under the LGPL.
+ * This code is licensed under the LGPL.
  *
  */
 
 #ifndef ARM_MISC_H
 #define ARM_MISC_H 1
+
+#include "memory.h"
 
 /* The CPU is also modeled as an interrupt controller.  */
 #define ARM_PIC_CPU_IRQ 0
@@ -17,7 +19,8 @@
 qemu_irq *arm_pic_init_cpu(CPUState *env);
 
 /* armv7m.c */
-qemu_irq *armv7m_init(int flash_size, int sram_size,
+qemu_irq *armv7m_init(MemoryRegion *address_space_mem,
+                      int flash_size, int sram_size,
                       const char *kernel_filename, const char *cpu_model);
 
 /* arm_boot.c */

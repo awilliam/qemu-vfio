@@ -70,10 +70,11 @@ void process_incoming_migration(QEMUFile *f)
     qemu_announce_self();
     DPRINTF("successfully loaded vm state\n");
 
-    incoming_expected = false;
-
-    if (autostart)
+    if (autostart) {
         vm_start();
+    } else {
+        runstate_set(RUN_STATE_PRELAUNCH);
+    }
 }
 
 int do_migrate(Monitor *mon, const QDict *qdict, QObject **ret_data)
@@ -124,7 +125,7 @@ int do_migrate(Monitor *mon, const QDict *qdict, QObject **ret_data)
     }
 
     current_migration = s;
-    notifier_list_notify(&migration_state_notifiers);
+    notifier_list_notify(&migration_state_notifiers, NULL);
     return 0;
 }
 
@@ -276,7 +277,7 @@ void migrate_fd_error(FdMigrationState *s)
 {
     DPRINTF("setting error state\n");
     s->state = MIG_STATE_ERROR;
-    notifier_list_notify(&migration_state_notifiers);
+    notifier_list_notify(&migration_state_notifiers, NULL);
     migrate_fd_cleanup(s);
 }
 
@@ -292,17 +293,16 @@ int migrate_fd_cleanup(FdMigrationState *s)
             ret = -1;
         }
         s->file = NULL;
+    } else {
+        if (s->mon) {
+            monitor_resume(s->mon);
+        }
     }
 
-    if (s->fd != -1)
+    if (s->fd != -1) {
         close(s->fd);
-
-    /* Don't resume monitor until we've flushed all of the buffers */
-    if (s->mon) {
-        monitor_resume(s->mon);
+        s->fd = -1;
     }
-
-    s->fd = -1;
 
     return ret;
 }
@@ -330,11 +330,8 @@ ssize_t migrate_fd_put_buffer(void *opaque, const void *data, size_t size)
     if (ret == -EAGAIN) {
         qemu_set_fd_handler2(s->fd, NULL, NULL, migrate_fd_put_notify, s);
     } else if (ret < 0) {
-        if (s->mon) {
-            monitor_resume(s->mon);
-        }
         s->state = MIG_STATE_ERROR;
-        notifier_list_notify(&migration_state_notifiers);
+        notifier_list_notify(&migration_state_notifiers, NULL);
     }
 
     return ret;
@@ -375,10 +372,10 @@ void migrate_fd_put_ready(void *opaque)
     DPRINTF("iterate\n");
     if (qemu_savevm_state_iterate(s->mon, s->file) == 1) {
         int state;
-        int old_vm_running = vm_running;
+        int old_vm_running = runstate_is_running();
 
         DPRINTF("done iterating\n");
-        vm_stop(VMSTOP_MIGRATE);
+        vm_stop(RUN_STATE_FINISH_MIGRATE);
 
         if ((qemu_savevm_state_complete(s->mon, s->file)) < 0) {
             if (old_vm_running) {
@@ -394,8 +391,11 @@ void migrate_fd_put_ready(void *opaque)
             }
             state = MIG_STATE_ERROR;
         }
+        if (state == MIG_STATE_COMPLETED) {
+            runstate_set(RUN_STATE_POSTMIGRATE);
+        }
         s->state = state;
-        notifier_list_notify(&migration_state_notifiers);
+        notifier_list_notify(&migration_state_notifiers, NULL);
     }
 }
 
@@ -415,7 +415,7 @@ void migrate_fd_cancel(MigrationState *mig_state)
     DPRINTF("cancelling migration\n");
 
     s->state = MIG_STATE_CANCELLED;
-    notifier_list_notify(&migration_state_notifiers);
+    notifier_list_notify(&migration_state_notifiers, NULL);
     qemu_savevm_state_cancel(s->mon, s->file);
 
     migrate_fd_cleanup(s);
@@ -429,10 +429,10 @@ void migrate_fd_release(MigrationState *mig_state)
    
     if (s->state == MIG_STATE_ACTIVE) {
         s->state = MIG_STATE_CANCELLED;
-        notifier_list_notify(&migration_state_notifiers);
+        notifier_list_notify(&migration_state_notifiers, NULL);
         migrate_fd_cleanup(s);
     }
-    qemu_free(s);
+    g_free(s);
 }
 
 void migrate_fd_wait_for_unfreeze(void *opaque)
@@ -458,6 +458,9 @@ int migrate_fd_close(void *opaque)
 {
     FdMigrationState *s = opaque;
 
+    if (s->mon) {
+        monitor_resume(s->mon);
+    }
     qemu_set_fd_handler2(s->fd, NULL, NULL, NULL, NULL);
     return s->close(s);
 }

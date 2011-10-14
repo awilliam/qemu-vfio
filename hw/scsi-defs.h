@@ -25,7 +25,7 @@
  */
 
 #define TEST_UNIT_READY       0x00
-#define REZERO_UNIT           0x01
+#define REWIND                0x01
 #define REQUEST_SENSE         0x03
 #define FORMAT_UNIT           0x04
 #define READ_BLOCK_LIMITS     0x05
@@ -48,14 +48,13 @@
 #define RECEIVE_DIAGNOSTIC    0x1c
 #define SEND_DIAGNOSTIC       0x1d
 #define ALLOW_MEDIUM_REMOVAL  0x1e
-
-#define SET_WINDOW            0x24
-#define READ_CAPACITY         0x25
+#define READ_CAPACITY_10      0x25
 #define READ_10               0x28
 #define WRITE_10              0x2a
 #define SEEK_10               0x2b
-#define WRITE_VERIFY          0x2e
-#define VERIFY                0x2f
+#define LOCATE_10             0x2b
+#define WRITE_VERIFY_10       0x2e
+#define VERIFY_10             0x2f
 #define SEARCH_HIGH           0x30
 #define SEARCH_EQUAL          0x31
 #define SEARCH_LOW            0x32
@@ -71,11 +70,15 @@
 #define WRITE_BUFFER          0x3b
 #define READ_BUFFER           0x3c
 #define UPDATE_BLOCK          0x3d
-#define READ_LONG             0x3e
-#define WRITE_LONG            0x3f
+#define READ_LONG_10          0x3e
+#define WRITE_LONG_10         0x3f
 #define CHANGE_DEFINITION     0x40
-#define WRITE_SAME            0x41
+#define WRITE_SAME_10         0x41
+#define UNMAP                 0x42
 #define READ_TOC              0x43
+#define REPORT_DENSITY_SUPPORT 0x44
+#define GET_CONFIGURATION     0x46
+#define GET_EVENT_STATUS_NOTIFICATION 0x4a
 #define LOG_SELECT            0x4c
 #define LOG_SENSE             0x4d
 #define MODE_SELECT_10        0x55
@@ -84,32 +87,46 @@
 #define MODE_SENSE_10         0x5a
 #define PERSISTENT_RESERVE_IN 0x5e
 #define PERSISTENT_RESERVE_OUT 0x5f
+#define VARLENGTH_CDB         0x7f
+#define WRITE_FILEMARKS_16    0x80
+#define EXTENDED_COPY         0x83
+#define ATA_PASSTHROUGH       0x85
+#define ACCESS_CONTROL_IN     0x86
+#define ACCESS_CONTROL_OUT    0x87
+#define READ_16               0x88
+#define COMPARE_AND_WRITE     0x89
+#define WRITE_16              0x8a
+#define WRITE_VERIFY_16       0x8e
+#define VERIFY_16             0x8f
+#define SYNCHRONIZE_CACHE_16  0x91
+#define LOCATE_16             0x92
 #define WRITE_SAME_16         0x93
+#define ERASE_16              0x93
+#define SERVICE_ACTION_IN_16  0x9e
+#define WRITE_LONG_16         0x9f
+#define REPORT_LUNS           0xa0
+#define BLANK                 0xa1
 #define MAINTENANCE_IN        0xa3
 #define MAINTENANCE_OUT       0xa4
 #define MOVE_MEDIUM           0xa5
+#define LOAD_UNLOAD           0xa6
 #define READ_12               0xa8
 #define WRITE_12              0xaa
+#define SERVICE_ACTION_IN_12  0xab
 #define WRITE_VERIFY_12       0xae
+#define VERIFY_12             0xaf
 #define SEARCH_HIGH_12        0xb0
 #define SEARCH_EQUAL_12       0xb1
 #define SEARCH_LOW_12         0xb2
 #define READ_ELEMENT_STATUS   0xb8
 #define SEND_VOLUME_TAG       0xb6
-#define WRITE_LONG_2          0xea
+#define READ_DEFECT_DATA_12   0xb7
+#define SET_CD_SPEED          0xbb
 
-/* from hw/scsi-generic.c */
-#define REWIND 0x01
-#define REPORT_DENSITY_SUPPORT 0x44
-#define GET_CONFIGURATION 0x46
-#define READ_16 0x88
-#define WRITE_16 0x8a
-#define WRITE_VERIFY_16 0x8e
-#define SERVICE_ACTION_IN 0x9e
-#define REPORT_LUNS 0xa0
-#define LOAD_UNLOAD 0xa6
-#define SET_CD_SPEED 0xbb
-#define BLANK 0xa1
+/*
+ * SERVICE ACTION IN subcodes
+ */
+#define SAI_READ_CAPACITY_16  0x10
 
 /*
  *  SAM Status codes
@@ -154,6 +171,7 @@
 
 #define TYPE_DISK           0x00
 #define TYPE_TAPE           0x01
+#define TYPE_PRINTER        0x02
 #define TYPE_PROCESSOR      0x03    /* HP scanners use this */
 #define TYPE_WORM           0x04    /* Treated as ROM by our system */
 #define TYPE_ROM            0x05
@@ -161,6 +179,12 @@
 #define TYPE_MOD            0x07    /* Magneto-optical disk -
 				     * - treated as TYPE_DISK */
 #define TYPE_MEDIUM_CHANGER 0x08
-#define TYPE_ENCLOSURE	    0x0d    /* Enclosure Services Device */
+#define TYPE_STORAGE_ARRAY  0x0c    /* Storage array device */
+#define TYPE_ENCLOSURE      0x0d    /* Enclosure Services Device */
+#define TYPE_RBC            0x0e    /* Simplified Direct-Access Device */
+#define TYPE_OSD            0x11    /* Object-storage Device */
+#define TYPE_WLUN           0x1e    /* Well known LUN */
+#define TYPE_NOT_PRESENT    0x1f
+#define TYPE_INACTIVE       0x20
 #define TYPE_NO_LUN         0x7f
 

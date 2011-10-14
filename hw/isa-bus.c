@@ -20,9 +20,11 @@
 #include "monitor.h"
 #include "sysbus.h"
 #include "isa.h"
+#include "exec-memory.h"
 
 struct ISABus {
     BusState qbus;
+    MemoryRegion *address_space_io;
     qemu_irq *irqs;
 };
 static ISABus *isabus;
@@ -38,7 +40,7 @@ static struct BusInfo isa_bus_info = {
     .get_fw_dev_path = isabus_get_fw_dev_path,
 };
 
-ISABus *isa_bus_new(DeviceState *dev)
+ISABus *isa_bus_new(DeviceState *dev, MemoryRegion *address_space_io)
 {
     if (isabus) {
         fprintf(stderr, "Can't create a second ISA bus\n");
@@ -50,6 +52,7 @@ ISABus *isa_bus_new(DeviceState *dev)
     }
 
     isabus = FROM_QBUS(ISABus, qbus_create(&isa_bus_info, dev, NULL));
+    isabus->address_space_io = address_space_io;
     return isabus;
 }
 
@@ -103,6 +106,16 @@ void isa_init_ioport_range(ISADevice *dev, uint16_t start, uint16_t length)
 void isa_init_ioport(ISADevice *dev, uint16_t ioport)
 {
     isa_init_ioport_range(dev, ioport, 1);
+}
+
+void isa_register_ioport(ISADevice *dev, MemoryRegion *io, uint16_t start)
+{
+    memory_region_add_subregion(isabus->address_space_io, start, io);
+    if (dev != NULL) {
+        assert(dev->nio < ARRAY_SIZE(dev->io));
+        dev->io[dev->nio++] = io;
+        isa_init_ioport_range(dev, start, memory_region_size(io));
+    }
 }
 
 static int isa_qdev_init(DeviceState *qdev, DeviceInfo *base)
@@ -200,6 +213,11 @@ static char *isabus_get_fw_dev_path(DeviceState *dev)
     }
 
     return strdup(path);
+}
+
+MemoryRegion *isa_address_space(ISADevice *dev)
+{
+    return get_system_memory();
 }
 
 device_init(isabus_register_devices)

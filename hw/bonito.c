@@ -42,6 +42,7 @@
 #include "mips.h"
 #include "pci_host.h"
 #include "sysemu.h"
+#include "exec-memory.h"
 
 //#define DEBUG_BONITO
 
@@ -240,7 +241,7 @@ static void bonito_writel(void *opaque, target_phys_addr_t addr, uint32_t val)
 
     saddr = (addr - BONITO_REGBASE) >> 2;
 
-    DPRINTF("bonito_writel "TARGET_FMT_plx" val %x saddr %x \n", addr, val, saddr);
+    DPRINTF("bonito_writel "TARGET_FMT_plx" val %x saddr %x\n", addr, val, saddr);
     switch (saddr) {
     case BONITO_BONPONCFG:
     case BONITO_IODEVCFG:
@@ -286,10 +287,10 @@ static void bonito_writel(void *opaque, target_phys_addr_t addr, uint32_t val)
         break;
     case BONITO_INTEN:
     case BONITO_INTISR:
-        DPRINTF("write to readonly bonito register %x \n", saddr);
+        DPRINTF("write to readonly bonito register %x\n", saddr);
         break;
     default:
-        DPRINTF("write to unknown bonito register %x \n", saddr);
+        DPRINTF("write to unknown bonito register %x\n", saddr);
         break;
     }
 }
@@ -301,7 +302,7 @@ static uint32_t bonito_readl(void *opaque, target_phys_addr_t addr)
 
     saddr = (addr - BONITO_REGBASE) >> 2;
 
-    DPRINTF("bonito_readl "TARGET_FMT_plx"  \n", addr);
+    DPRINTF("bonito_readl "TARGET_FMT_plx"\n", addr);
     switch (saddr) {
     case BONITO_INTISR:
         return s->regs[saddr];
@@ -327,7 +328,7 @@ static void bonito_pciconf_writel(void *opaque, target_phys_addr_t addr,
 {
     PCIBonitoState *s = opaque;
 
-    DPRINTF("bonito_pciconf_writel "TARGET_FMT_plx" val %x \n", addr, val);
+    DPRINTF("bonito_pciconf_writel "TARGET_FMT_plx" val %x\n", addr, val);
     s->dev.config_write(&s->dev, addr, val, 4);
 }
 
@@ -442,7 +443,7 @@ static uint32_t bonito_sbridge_pciaddr(void *opaque, target_phys_addr_t addr)
         exit(1);
     }
     pciaddr = PCI_ADDR(pci_bus_num(s->pcihost->bus), devno, funno, regno);
-    DPRINTF("cfgaddr %x pciaddr %x busno %x devno %d funno %d regno %d \n",
+    DPRINTF("cfgaddr %x pciaddr %x busno %x devno %d funno %d regno %d\n",
         cfgaddr, pciaddr, pci_bus_num(s->pcihost->bus), devno, funno, regno);
 
     return pciaddr;
@@ -455,7 +456,7 @@ static void bonito_spciconf_writeb(void *opaque, target_phys_addr_t addr,
     uint32_t pciaddr;
     uint16_t status;
 
-    DPRINTF("bonito_spciconf_writeb "TARGET_FMT_plx" val %x \n", addr, val);
+    DPRINTF("bonito_spciconf_writeb "TARGET_FMT_plx" val %x\n", addr, val);
     pciaddr = bonito_sbridge_pciaddr(s, addr);
 
     if (pciaddr == 0xffffffff) {
@@ -479,7 +480,7 @@ static void bonito_spciconf_writew(void *opaque, target_phys_addr_t addr,
     uint32_t pciaddr;
     uint16_t status;
 
-    DPRINTF("bonito_spciconf_writew "TARGET_FMT_plx" val %x \n", addr, val);
+    DPRINTF("bonito_spciconf_writew "TARGET_FMT_plx" val %x\n", addr, val);
     assert((addr&0x1)==0);
 
     pciaddr = bonito_sbridge_pciaddr(s, addr);
@@ -505,7 +506,7 @@ static void bonito_spciconf_writel(void *opaque, target_phys_addr_t addr,
     uint32_t pciaddr;
     uint16_t status;
 
-    DPRINTF("bonito_spciconf_writel "TARGET_FMT_plx" val %x \n", addr, val);
+    DPRINTF("bonito_spciconf_writel "TARGET_FMT_plx" val %x\n", addr, val);
     assert((addr&0x3)==0);
 
     pciaddr = bonito_sbridge_pciaddr(s, addr);
@@ -530,7 +531,7 @@ static uint32_t bonito_spciconf_readb(void *opaque, target_phys_addr_t addr)
     uint32_t pciaddr;
     uint16_t status;
 
-    DPRINTF("bonito_spciconf_readb "TARGET_FMT_plx"  \n", addr);
+    DPRINTF("bonito_spciconf_readb "TARGET_FMT_plx"\n", addr);
     pciaddr = bonito_sbridge_pciaddr(s, addr);
 
     if (pciaddr == 0xffffffff) {
@@ -554,7 +555,7 @@ static uint32_t bonito_spciconf_readw(void *opaque, target_phys_addr_t addr)
     uint32_t pciaddr;
     uint16_t status;
 
-    DPRINTF("bonito_spciconf_readw "TARGET_FMT_plx"  \n", addr);
+    DPRINTF("bonito_spciconf_readw "TARGET_FMT_plx"\n", addr);
     assert((addr&0x1)==0);
 
     pciaddr = bonito_sbridge_pciaddr(s, addr);
@@ -580,7 +581,7 @@ static uint32_t bonito_spciconf_readl(void *opaque, target_phys_addr_t addr)
     uint32_t pciaddr;
     uint16_t status;
 
-    DPRINTF("bonito_spciconf_readl "TARGET_FMT_plx"  \n", addr);
+    DPRINTF("bonito_spciconf_readl "TARGET_FMT_plx"\n", addr);
     assert((addr&0x3) == 0);
 
     pciaddr = bonito_sbridge_pciaddr(s, addr);
@@ -773,7 +774,9 @@ PCIBus *bonito_init(qemu_irq *pic)
     dev = qdev_create(NULL, "Bonito-pcihost");
     pcihost = FROM_SYSBUS(BonitoState, sysbus_from_qdev(dev));
     b = pci_register_bus(&pcihost->busdev.qdev, "pci", pci_bonito_set_irq,
-                         NULL, pci_bonito_map_irq, pic, 0x28, 32);
+                         NULL, pci_bonito_map_irq, pic, get_system_memory(),
+                         get_system_io(),
+                         0x28, 32);
     pcihost->bus = b;
     qdev_init_nofail(dev);
 

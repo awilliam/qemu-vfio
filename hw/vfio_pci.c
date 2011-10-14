@@ -180,7 +180,7 @@ static void vfio_intx_interrupt(void *opaque)
     qemu_set_irq(vdev->pdev.irq[vdev->intx.pin], 1);
 }
 
-static void vfio_eoi(Notifier *notify)
+static void vfio_eoi(Notifier *notify, void *data)
 {
     VFIODevice *vdev = container_of(notify, VFIODevice, intx.eoi);
 
@@ -196,7 +196,7 @@ static void vfio_eoi(Notifier *notify)
     vfio_unmask_intx(vdev);
 }
 
-static void vfio_update_irq(Notifier *notify)
+static void vfio_update_irq(Notifier *notify, void *data)
 {
     VFIODevice *vdev = container_of(notify, VFIODevice, intx.update_irq);
     int irq = pci_get_irq(&vdev->pdev, vdev->intx.pin);
@@ -221,7 +221,7 @@ static void vfio_update_irq(Notifier *notify)
     ioapic_add_gsi_eoi_notifier(&vdev->intx.eoi, vdev->intx.irq);
 
     /* Re-enable the interrupt in cased we missed an EOI */
-    vfio_eoi(&vdev->intx.eoi);
+    vfio_eoi(&vdev->intx.eoi, NULL);
 }
 
 static int vfio_enable_intx(VFIODevice *vdev)
@@ -318,9 +318,9 @@ static void vfio_enable_msi(VFIODevice *vdev, bool msix)
 
     vdev->nr_vectors = msix ? vdev->pdev.msix_entries_nr :
                               msi_nr_vectors_allocated(&vdev->pdev);
-    vdev->msi_vectors = qemu_malloc(vdev->nr_vectors * sizeof(MSIVector));
+    vdev->msi_vectors = g_malloc(vdev->nr_vectors * sizeof(MSIVector));
 
-    fds = qemu_malloc((vdev->nr_vectors + 2) * sizeof(int));
+    fds = g_malloc((vdev->nr_vectors + 2) * sizeof(int));
     fds[0] = msix ? VFIO_PCI_MSIX_IRQ_INDEX : VFIO_PCI_MSI_IRQ_INDEX;
     fds[1] = vdev->nr_vectors;
 
@@ -351,15 +351,15 @@ static void vfio_enable_msi(VFIODevice *vdev, bool msix)
             qemu_set_fd_handler(fds[i + 1], NULL, NULL, NULL);
             event_notifier_cleanup(&vdev->msi_vectors[i].interrupt);
         }
-        qemu_free(fds);
-        qemu_free(vdev->msi_vectors);
+        g_free(fds);
+        g_free(vdev->msi_vectors);
         vdev->nr_vectors = 0;
         return;
     }
 
     vdev->interrupt = msix ? INT_MSIX : INT_MSI;
 
-    qemu_free(fds);
+    g_free(fds);
 
     DPRINTF("%s(%04x:%02x:%02x.%x) Enabled %d vectors\n", __FUNCTION__,
             vdev->host.seg, vdev->host.bus, vdev->host.dev,
@@ -384,7 +384,7 @@ static void vfio_disable_msi(VFIODevice *vdev, bool msix)
         event_notifier_cleanup(&vdev->msi_vectors[i].interrupt);
     }
 
-    qemu_free(vdev->msi_vectors);
+    g_free(vdev->msi_vectors);
     vdev->nr_vectors = 0;
     vdev->interrupt = INT_NONE;
 
@@ -1306,7 +1306,7 @@ static int enable_uiommu(VFIODevice *vdev)
     }
 
     if (!uiommu) {
-        uiommu = qemu_mallocz(sizeof(*uiommu));
+        uiommu = g_mallocz(sizeof(*uiommu));
 
         uiommu->fd = fd;
         uiommu->opened = opened;
@@ -1349,7 +1349,7 @@ static void disable_uiommu(VFIODevice *vdev)
         if (uiommu->opened) {
             close(uiommu->fd);
         }
-        qemu_free(uiommu);
+        g_free(uiommu);
     }
 }
 #endif
@@ -1411,13 +1411,13 @@ static VFIOGroup *vfio_get_group(unsigned int groupid)
     if (!group) {
         char path[32];
 
-        group = qemu_mallocz(sizeof(*group));
+        group = g_malloc0(sizeof(*group));
 
         sprintf(path, "/dev/vfio/%u", groupid);
         group->fd = open(path, O_RDWR);
         if (group->fd < 0) {
             error_report("vfio: error opening %s: %s", path, strerror(errno));
-            qemu_free(group);
+            g_free(group);
             return NULL;
         }
 
@@ -1434,7 +1434,7 @@ static void vfio_put_group(VFIOGroup *group)
     if (QLIST_EMPTY(&group->device_list)) {
         QLIST_REMOVE(group, group_next);
         close(group->fd);
-        qemu_free(group);
+        g_free(group);
     }
 }
 
@@ -1589,7 +1589,7 @@ static void vfio_put_device(VFIODevice *vdev)
 
 static int vfio_get_iommu(VFIOGroup *group)
 {
-    group->iommu = qemu_mallocz(sizeof(*(group->iommu)));
+    group->iommu = g_malloc0(sizeof(*(group->iommu)));
     group->iommu->fd = ioctl(group->fd, VFIO_GROUP_GET_IOMMU_FD);
     if (group->iommu->fd < 0) {
         error_report("vfio: error getting iommu from group %u: %s",

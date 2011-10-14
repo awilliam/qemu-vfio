@@ -275,14 +275,14 @@ static int parse_string(DeviceState *dev, Property *prop, const char *str)
     char **ptr = qdev_get_prop_ptr(dev, prop);
 
     if (*ptr)
-        qemu_free(*ptr);
-    *ptr = qemu_strdup(str);
+        g_free(*ptr);
+    *ptr = g_strdup(str);
     return 0;
 }
 
 static void free_string(DeviceState *dev, Property *prop)
 {
-    qemu_free(*(char **)qdev_get_prop_ptr(dev, prop));
+    g_free(*(char **)qdev_get_prop_ptr(dev, prop));
 }
 
 static int print_string(DeviceState *dev, Property *prop, char *dest, size_t len)
@@ -312,7 +312,7 @@ static int parse_drive(DeviceState *dev, Property *prop, const char *str)
     bs = bdrv_find(str);
     if (bs == NULL)
         return -ENOENT;
-    if (bdrv_attach(bs, dev) < 0)
+    if (bdrv_attach_dev(bs, dev) < 0)
         return -EEXIST;
     *ptr = bs;
     return 0;
@@ -323,7 +323,7 @@ static void free_drive(DeviceState *dev, Property *prop)
     BlockDriverState **ptr = qdev_get_prop_ptr(dev, prop);
 
     if (*ptr) {
-        bdrv_detach(*ptr, dev);
+        bdrv_detach_dev(*ptr, dev);
         blockdev_auto_del(*ptr);
     }
 }
@@ -524,6 +524,8 @@ static int parse_pci_devfn(DeviceState *dev, Property *prop, const char *str)
         return -EINVAL;
     if (fn > 7)
         return -EINVAL;
+    if (slot > 31)
+        return -EINVAL;
     *ptr = slot << 3 | fn;
     return 0;
 }
@@ -678,7 +680,7 @@ int qdev_prop_set_drive(DeviceState *dev, const char *name, BlockDriverState *va
 {
     int res;
 
-    res = bdrv_attach(value, dev);
+    res = bdrv_attach_dev(value, dev);
     if (res < 0) {
         error_report("Can't attach drive %s to %s.%s: %s",
                      bdrv_get_device_name(value),
@@ -768,7 +770,7 @@ static int qdev_add_one_global(QemuOpts *opts, void *opaque)
 {
     GlobalProperty *g;
 
-    g = qemu_mallocz(sizeof(*g));
+    g = g_malloc0(sizeof(*g));
     g->driver   = qemu_opt_get(opts, "driver");
     g->property = qemu_opt_get(opts, "property");
     g->value    = qemu_opt_get(opts, "value");

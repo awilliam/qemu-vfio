@@ -141,6 +141,11 @@ static const QErrorStringTable qerror_table[] = {
         .desc      = "Invalid JSON syntax",
     },
     {
+        .error_fmt = QERR_JSON_PARSE_ERROR,
+        .desc      = "JSON parse error, %(message)",
+
+    },
+    {
         .error_fmt = QERR_KVM_MISSING_CAP,
         .desc      = "Using KVM without %(capability), %(feature) unavailable",
     },
@@ -189,8 +194,16 @@ static const QErrorStringTable qerror_table[] = {
         .desc      = "QMP input object member '%(member)' is unexpected",
     },
     {
+        .error_fmt = QERR_RESET_REQUIRED,
+        .desc      = "Resetting the Virtual Machine is required",
+    },
+    {
         .error_fmt = QERR_SET_PASSWD_FAILED,
         .desc      = "Could not set password",
+    },
+    {
+        .error_fmt = QERR_ADD_CLIENT_FAILED,
+        .desc      = "Could not add client",
     },
     {
         .error_fmt = QERR_TOO_MANY_FILES,
@@ -213,6 +226,14 @@ static const QErrorStringTable qerror_table[] = {
         .error_fmt = QERR_VNC_SERVER_FAILED,
         .desc      = "Could not start VNC server on %(target)",
     },
+    {
+        .error_fmt = QERR_QGA_LOGGING_FAILED,
+        .desc      = "Guest agent failed to log non-optional log statement",
+    },
+    {
+        .error_fmt = QERR_QGA_COMMAND_FAILED,
+        .desc      = "Guest agent command failed, error was '%(message)'",
+    },
     {}
 };
 
@@ -225,7 +246,7 @@ QError *qerror_new(void)
 {
     QError *qerr;
 
-    qerr = qemu_mallocz(sizeof(*qerr));
+    qerr = g_malloc0(sizeof(*qerr));
     QOBJECT_INIT(qerr, &qerror_type);
 
     return qerr;
@@ -461,6 +482,39 @@ void qerror_report_internal(const char *file, int linenr, const char *func,
     }
 }
 
+/* Evil... */
+struct Error
+{
+    QDict *obj;
+    const char *fmt;
+    char *msg;
+};
+
+void qerror_report_err(Error *err)
+{
+    QError *qerr;
+    int i;
+
+    qerr = qerror_new();
+    loc_save(&qerr->loc);
+    QINCREF(err->obj);
+    qerr->error = err->obj;
+
+    for (i = 0; qerror_table[i].error_fmt; i++) {
+        if (strcmp(qerror_table[i].error_fmt, err->fmt) == 0) {
+            qerr->entry = &qerror_table[i];
+            break;
+        }
+    }
+
+    if (monitor_cur_is_qmp()) {
+        monitor_set_error(cur_mon, qerr);
+    } else {
+        qerror_print(qerr);
+        QDECREF(qerr);
+    }
+}
+
 /**
  * qobject_to_qerror(): Convert a QObject into a QError
  */
@@ -484,5 +538,5 @@ static void qerror_destroy_obj(QObject *obj)
     qerr = qobject_to_qerror(obj);
 
     QDECREF(qerr->error);
-    qemu_free(qerr);
+    g_free(qerr);
 }

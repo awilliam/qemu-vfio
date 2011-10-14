@@ -19,6 +19,7 @@
 
 #include "sysbus.h"
 #include "monitor.h"
+#include "exec-memory.h"
 
 static void sysbus_dev_print(Monitor *mon, DeviceState *dev, int indent);
 static char *sysbus_get_fw_dev_path(DeviceState *dev);
@@ -49,11 +50,22 @@ void sysbus_mmio_map(SysBusDevice *dev, int n, target_phys_addr_t addr)
     }
     if (dev->mmio[n].addr != (target_phys_addr_t)-1) {
         /* Unregister previous mapping.  */
-        cpu_register_physical_memory(dev->mmio[n].addr, dev->mmio[n].size,
-                                     IO_MEM_UNASSIGNED);
+        if (dev->mmio[n].memory) {
+            memory_region_del_subregion(get_system_memory(),
+                                        dev->mmio[n].memory);
+        } else if (dev->mmio[n].unmap) {
+            dev->mmio[n].unmap(dev, dev->mmio[n].addr);
+        } else {
+            cpu_register_physical_memory(dev->mmio[n].addr, dev->mmio[n].size,
+                                         IO_MEM_UNASSIGNED);
+        }
     }
     dev->mmio[n].addr = addr;
-    if (dev->mmio[n].cb) {
+    if (dev->mmio[n].memory) {
+        memory_region_add_subregion(get_system_memory(),
+                                    addr,
+                                    dev->mmio[n].memory);
+    } else if (dev->mmio[n].cb) {
         dev->mmio[n].cb(dev, addr);
     } else {
         cpu_register_physical_memory(addr, dev->mmio[n].size,
@@ -95,16 +107,33 @@ void sysbus_init_mmio(SysBusDevice *dev, target_phys_addr_t size,
     dev->mmio[n].iofunc = iofunc;
 }
 
-void sysbus_init_mmio_cb(SysBusDevice *dev, target_phys_addr_t size,
-                         mmio_mapfunc cb)
+void sysbus_init_mmio_cb2(SysBusDevice *dev,
+                          mmio_mapfunc cb, mmio_mapfunc unmap)
 {
     int n;
 
     assert(dev->num_mmio < QDEV_MAX_MMIO);
     n = dev->num_mmio++;
     dev->mmio[n].addr = -1;
-    dev->mmio[n].size = size;
+    dev->mmio[n].size = 0;
     dev->mmio[n].cb = cb;
+    dev->mmio[n].unmap = unmap;
+}
+
+void sysbus_init_mmio_region(SysBusDevice *dev, MemoryRegion *memory)
+{
+    int n;
+
+    assert(dev->num_mmio < QDEV_MAX_MMIO);
+    n = dev->num_mmio++;
+    dev->mmio[n].addr = -1;
+    dev->mmio[n].size = memory_region_size(memory);
+    dev->mmio[n].memory = memory;
+}
+
+MemoryRegion *sysbus_mmio_get_region(SysBusDevice *dev, int n)
+{
+    return dev->mmio[n].memory;
 }
 
 void sysbus_init_ioports(SysBusDevice *dev, pio_addr_t ioport, pio_addr_t size)
@@ -137,8 +166,8 @@ void sysbus_register_dev(const char *name, size_t size, sysbus_initfn init)
 {
     SysBusDeviceInfo *info;
 
-    info = qemu_mallocz(sizeof(*info));
-    info->qdev.name = qemu_strdup(name);
+    info = g_malloc0(sizeof(*info));
+    info->qdev.name = g_strdup(name);
     info->qdev.size = size;
     info->init = init;
     sysbus_register_withprop(info);
@@ -231,4 +260,33 @@ static char *sysbus_get_fw_dev_path(DeviceState *dev)
     }
 
     return strdup(path);
+}
+
+void sysbus_add_memory(SysBusDevice *dev, target_phys_addr_t addr,
+                       MemoryRegion *mem)
+{
+    memory_region_add_subregion(get_system_memory(), addr, mem);
+}
+
+void sysbus_add_memory_overlap(SysBusDevice *dev, target_phys_addr_t addr,
+                               MemoryRegion *mem, unsigned priority)
+{
+    memory_region_add_subregion_overlap(get_system_memory(), addr, mem,
+                                        priority);
+}
+
+void sysbus_del_memory(SysBusDevice *dev, MemoryRegion *mem)
+{
+    memory_region_del_subregion(get_system_memory(), mem);
+}
+
+void sysbus_add_io(SysBusDevice *dev, target_phys_addr_t addr,
+                       MemoryRegion *mem)
+{
+    memory_region_add_subregion(get_system_io(), addr, mem);
+}
+
+void sysbus_del_io(SysBusDevice *dev, MemoryRegion *mem)
+{
+    memory_region_del_subregion(get_system_io(), mem);
 }

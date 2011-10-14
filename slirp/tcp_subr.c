@@ -250,7 +250,7 @@ tcp_close(struct tcpcb *tp)
 		t = tcpiphdr_next(t);
 		m = tcpiphdr_prev(t)->ti_mbuf;
 		remque(tcpiphdr2qlink(tcpiphdr_prev(t)));
-		m_freem(m);
+		m_free(m);
 	}
 	free(tp);
         so->so_tcpcb = NULL;
@@ -902,7 +902,7 @@ int tcp_ctl(struct socket *so)
                     return 1;
                 }
                 do_pty = ex_ptr->ex_pty;
-                DEBUG_MISC((dfd, " executing %s \n",ex_ptr->ex_exec));
+                DEBUG_MISC((dfd, " executing %s\n", ex_ptr->ex_exec));
                 return fork_exec(so, ex_ptr->ex_exec, do_pty);
             }
         }

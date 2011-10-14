@@ -283,6 +283,7 @@
 #define MSR_IA32_APICBASE_BSP           (1<<8)
 #define MSR_IA32_APICBASE_ENABLE        (1<<11)
 #define MSR_IA32_APICBASE_BASE          (0xfffff<<12)
+#define MSR_IA32_TSCDEADLINE            0x6e0
 
 #define MSR_MTRRcap			0xfe
 #define MSR_MTRRcap_VCNT		8
@@ -687,6 +688,7 @@ typedef struct CPUX86State {
     uint64_t async_pf_en_msr;
 
     uint64_t tsc;
+    uint64_t tsc_deadline;
 
     uint64_t mcg_status;
 
@@ -743,6 +745,7 @@ typedef struct CPUX86State {
     uint32_t cpuid_kvm_features;
     uint32_t cpuid_svm_features;
     bool tsc_valid;
+    int tsc_khz;
     
     /* in order to simplify APIC support, we leave this pointer to the
        user */
@@ -889,7 +892,7 @@ void host_cpuid(uint32_t function, uint32_t count,
 
 /* helper.c */
 int cpu_x86_handle_mmu_fault(CPUX86State *env, target_ulong addr,
-                             int is_write, int mmu_idx, int is_softmmu);
+                             int is_write, int mmu_idx);
 #define cpu_handle_mmu_fault cpu_x86_handle_mmu_fault
 void cpu_x86_set_a20(CPUX86State *env, int a20_state);
 
@@ -946,7 +949,7 @@ uint64_t cpu_get_tsc(CPUX86State *env);
 #define cpu_list_id x86_cpu_list
 #define cpudef_setup	x86_cpudef_setup
 
-#define CPU_SAVE_VERSION 12
+#define CPU_SAVE_VERSION 13
 
 /* MMU modes definitions */
 #define MMU_MODE0_SUFFIX _kernel
@@ -989,11 +992,6 @@ static inline int cpu_mmu_index (CPUState *env)
 
 /* translate.c */
 void optimize_flags_init(void);
-
-typedef struct CCTable {
-    int (*compute_all)(void); /* return all the flags */
-    int (*compute_c)(void);  /* return the C flag */
-} CCTable;
 
 #if defined(CONFIG_USER_ONLY)
 static inline void cpu_clone_regs(CPUState *env, target_ulong newsp)
@@ -1050,6 +1048,9 @@ void cpu_x86_inject_mce(Monitor *mon, CPUState *cenv, int bank,
 /* op_helper.c */
 void do_interrupt(CPUState *env);
 void do_interrupt_x86_hardirq(CPUState *env, int intno, int is_hw);
+void QEMU_NORETURN raise_exception_env(int exception_index, CPUState *nenv);
+void QEMU_NORETURN raise_exception_err_env(CPUState *nenv, int exception_index,
+                                           int error_code);
 
 void do_smm_enter(CPUState *env1);
 

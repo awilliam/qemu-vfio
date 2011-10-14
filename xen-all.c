@@ -19,6 +19,7 @@
 
 #include <xen/hvm/ioreq.h>
 #include <xen/hvm/params.h>
+#include <xen/hvm/e820.h>
 
 //#define DEBUG_XEN
 
@@ -139,33 +140,45 @@ static void xen_ram_init(ram_addr_t ram_size)
     RAMBlock *new_block;
     ram_addr_t below_4g_mem_size, above_4g_mem_size = 0;
 
-    new_block = qemu_mallocz(sizeof (*new_block));
+    new_block = g_malloc0(sizeof (*new_block));
     pstrcpy(new_block->idstr, sizeof (new_block->idstr), "xen.ram");
     new_block->host = NULL;
     new_block->offset = 0;
     new_block->length = ram_size;
+    if (ram_size >= HVM_BELOW_4G_RAM_END) {
+        /* Xen does not allocate the memory continuously, and keep a hole at
+         * HVM_BELOW_4G_MMIO_START of HVM_BELOW_4G_MMIO_LENGTH
+         */
+        new_block->length += HVM_BELOW_4G_MMIO_LENGTH;
+    }
 
     QLIST_INSERT_HEAD(&ram_list.blocks, new_block, next);
 
-    ram_list.phys_dirty = qemu_realloc(ram_list.phys_dirty,
+    ram_list.phys_dirty = g_realloc(ram_list.phys_dirty,
                                        new_block->length >> TARGET_PAGE_BITS);
     memset(ram_list.phys_dirty + (new_block->offset >> TARGET_PAGE_BITS),
            0xff, new_block->length >> TARGET_PAGE_BITS);
 
-    if (ram_size >= 0xe0000000 ) {
-        above_4g_mem_size = ram_size - 0xe0000000;
-        below_4g_mem_size = 0xe0000000;
+    if (ram_size >= HVM_BELOW_4G_RAM_END) {
+        above_4g_mem_size = ram_size - HVM_BELOW_4G_RAM_END;
+        below_4g_mem_size = HVM_BELOW_4G_RAM_END;
     } else {
         below_4g_mem_size = ram_size;
     }
 
-    cpu_register_physical_memory(0, below_4g_mem_size, new_block->offset);
-#if TARGET_PHYS_ADDR_BITS > 32
+    cpu_register_physical_memory(0, 0xa0000, 0);
+    /* Skip of the VGA IO memory space, it will be registered later by the VGA
+     * emulated device.
+     *
+     * The area between 0xc0000 and 0x100000 will be used by SeaBIOS to load
+     * the Options ROM, so it is registered here as RAM.
+     */
+    cpu_register_physical_memory(0xc0000, below_4g_mem_size - 0xc0000,
+                                 0xc0000);
     if (above_4g_mem_size > 0) {
         cpu_register_physical_memory(0x100000000ULL, above_4g_mem_size,
-                                     new_block->offset + below_4g_mem_size);
+                                     0x100000000ULL);
     }
-#endif
 }
 
 void xen_ram_alloc(ram_addr_t ram_addr, ram_addr_t size)
@@ -177,17 +190,17 @@ void xen_ram_alloc(ram_addr_t ram_addr, ram_addr_t size)
     trace_xen_ram_alloc(ram_addr, size);
 
     nr_pfn = size >> TARGET_PAGE_BITS;
-    pfn_list = qemu_malloc(sizeof (*pfn_list) * nr_pfn);
+    pfn_list = g_malloc(sizeof (*pfn_list) * nr_pfn);
 
     for (i = 0; i < nr_pfn; i++) {
         pfn_list[i] = (ram_addr >> TARGET_PAGE_BITS) + i;
     }
 
     if (xc_domain_populate_physmap_exact(xen_xc, xen_domid, nr_pfn, 0, 0, pfn_list)) {
-        hw_error("xen: failed to populate ram at %lx", ram_addr);
+        hw_error("xen: failed to populate ram at " RAM_ADDR_FMT, ram_addr);
     }
 
-    qemu_free(pfn_list);
+    g_free(pfn_list);
 }
 
 static XenPhysmap *get_physmapping(XenIOState *state,
@@ -254,7 +267,7 @@ go_physmap:
         }
     }
 
-    physmap = qemu_malloc(sizeof (XenPhysmap));
+    physmap = g_malloc(sizeof (XenPhysmap));
 
     physmap->start_addr = start_addr;
     physmap->size = size;
@@ -607,7 +620,7 @@ static void cpu_ioreq_move(ioreq_t *req)
             }
         }
     } else {
-        target_ulong tmp;
+        uint64_t tmp;
 
         if (req->dir == IOREQ_READ) {
             for (i = 0; i < req->count; i++) {
@@ -723,7 +736,7 @@ static void cpu_handle_ioreq(void *opaque)
          * guest resumes and does a hlt with interrupts disabled which
          * causes Xen to powerdown the domain.
          */
-        if (vm_running) {
+        if (runstate_is_running()) {
             if (qemu_shutdown_requested_get()) {
                 destroy_hvm_domain();
             }
@@ -797,12 +810,17 @@ void xenstore_store_pv_console_info(int i, CharDriverState *chr)
     }
 }
 
-static void xenstore_record_dm_state(XenIOState *s, const char *state)
+static void xenstore_record_dm_state(struct xs_handle *xs, const char *state)
 {
     char path[50];
 
+    if (xs == NULL) {
+        fprintf(stderr, "xenstore connection not initialized\n");
+        exit(1);
+    }
+
     snprintf(path, sizeof (path), "/local/domain/0/device-model/%u/state", xen_domid);
-    if (!xs_write(s->xenstore, XBT_NULL, path, state, strlen(state))) {
+    if (!xs_write(xs, XBT_NULL, path, state, strlen(state))) {
         fprintf(stderr, "error recording dm state\n");
         exit(1);
     }
@@ -823,23 +841,30 @@ static void xen_main_loop_prepare(XenIOState *state)
     if (evtchn_fd != -1) {
         qemu_set_fd_handler(evtchn_fd, cpu_handle_ioreq, NULL, state);
     }
-
-    /* record state running */
-    xenstore_record_dm_state(state, "running");
 }
 
 
 /* Initialise Xen */
 
-static void xen_vm_change_state_handler(void *opaque, int running, int reason)
+static void xen_change_state_handler(void *opaque, int running,
+                                     RunState state)
 {
-    XenIOState *state = opaque;
     if (running) {
-        xen_main_loop_prepare(state);
+        /* record state running */
+        xenstore_record_dm_state(xenstore, "running");
     }
 }
 
-static void xen_exit_notifier(Notifier *n)
+static void xen_hvm_change_state_handler(void *opaque, int running,
+                                         RunState rstate)
+{
+    XenIOState *xstate = opaque;
+    if (running) {
+        xen_main_loop_prepare(xstate);
+    }
+}
+
+static void xen_exit_notifier(Notifier *n, void *data)
 {
     XenIOState *state = container_of(n, XenIOState, exit);
 
@@ -854,6 +879,7 @@ int xen_init(void)
         xen_be_printf(NULL, 0, "can't open xen interface\n");
         return -1;
     }
+    qemu_add_vm_change_state_handler(xen_change_state_handler, NULL);
 
     return 0;
 }
@@ -864,7 +890,7 @@ int xen_hvm_init(void)
     unsigned long ioreq_pfn;
     XenIOState *state;
 
-    state = qemu_mallocz(sizeof (XenIOState));
+    state = g_malloc0(sizeof (XenIOState));
 
     state->xce_handle = xen_xc_evtchn_open(NULL, 0);
     if (state->xce_handle == XC_HANDLER_INITIAL_VALUE) {
@@ -898,7 +924,7 @@ int xen_hvm_init(void)
         hw_error("map buffered IO page returned error %d", errno);
     }
 
-    state->ioreq_local_port = qemu_mallocz(smp_cpus * sizeof (evtchn_port_t));
+    state->ioreq_local_port = g_malloc0(smp_cpus * sizeof (evtchn_port_t));
 
     /* FIXME: how about if we overflow the page here? */
     for (i = 0; i < smp_cpus; i++) {
@@ -915,7 +941,7 @@ int xen_hvm_init(void)
     xen_map_cache_init();
     xen_ram_init(ram_size);
 
-    qemu_add_vm_change_state_handler(xen_vm_change_state_handler, state);
+    qemu_add_vm_change_state_handler(xen_hvm_change_state_handler, state);
 
     state->client = xen_cpu_phys_memory_client;
     QLIST_INIT(&state->physmap);

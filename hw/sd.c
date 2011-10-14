@@ -31,7 +31,6 @@
 
 #include "hw.h"
 #include "block.h"
-#include "block_int.h"
 #include "sd.h"
 
 //#define DEBUG_SD 1
@@ -393,9 +392,7 @@ static void sd_reset(SDState *sd, BlockDriverState *bdrv)
     } else {
         sect = 0;
     }
-    sect <<= 9;
-
-    size = sect + 1;
+    size = sect << 9;
 
     sect = (size >> (HWBLOCK_SHIFT + SECTOR_SHIFT + WPGROUP_SHIFT)) + 1;
 
@@ -411,9 +408,9 @@ static void sd_reset(SDState *sd, BlockDriverState *bdrv)
     sd->bdrv = bdrv;
 
     if (sd->wp_groups)
-        qemu_free(sd->wp_groups);
+        g_free(sd->wp_groups);
     sd->wp_switch = bdrv ? bdrv_is_read_only(bdrv) : 0;
-    sd->wp_groups = (int *) qemu_mallocz(sizeof(int) * sect);
+    sd->wp_groups = (int *) g_malloc0(sizeof(int) * sect);
     memset(sd->function_group, 0, sizeof(int) * 6);
     sd->erase_start = 0;
     sd->erase_end = 0;
@@ -422,13 +419,9 @@ static void sd_reset(SDState *sd, BlockDriverState *bdrv)
     sd->pwd_len = 0;
 }
 
-static void sd_cardchange(void *opaque, int reason)
+static void sd_cardchange(void *opaque, bool load)
 {
     SDState *sd = opaque;
-
-    if (!(reason & CHANGE_MEDIA)) {
-        return;
-    }
 
     qemu_set_irq(sd->inserted_cb, bdrv_is_inserted(sd->bdrv));
     if (bdrv_is_inserted(sd->bdrv)) {
@@ -436,6 +429,10 @@ static void sd_cardchange(void *opaque, int reason)
         qemu_set_irq(sd->readonly_cb, sd->wp_switch);
     }
 }
+
+static const BlockDevOps sd_block_ops = {
+    .change_media_cb = sd_cardchange,
+};
 
 /* We do not model the chip select pin, so allow the board to select
    whether card should be in SSI or MMC/SD mode.  It is also up to the
@@ -445,13 +442,14 @@ SDState *sd_init(BlockDriverState *bs, int is_spi)
 {
     SDState *sd;
 
-    sd = (SDState *) qemu_mallocz(sizeof(SDState));
+    sd = (SDState *) g_malloc0(sizeof(SDState));
     sd->buf = qemu_blockalign(bs, 512);
     sd->spi = is_spi;
     sd->enable = 1;
     sd_reset(sd, bs);
     if (sd->bdrv) {
-        bdrv_set_change_cb(sd->bdrv, sd_cardchange, sd);
+        bdrv_attach_dev_nofail(sd->bdrv, sd);
+        bdrv_set_dev_ops(sd->bdrv, &sd_block_ops, sd);
     }
     return sd;
 }
@@ -1450,14 +1448,8 @@ void sd_write_data(SDState *sd, uint8_t value)
         break;
 
     case 25:	/* CMD25:  WRITE_MULTIPLE_BLOCK */
-        sd->data[sd->data_offset ++] = value;
-        if (sd->data_offset >= sd->blk_len) {
-            /* TODO: Check CRC before committing */
-            sd->state = sd_programming_state;
-            BLK_WRITE_BLOCK(sd->data_start, sd->data_offset);
-            sd->blk_written ++;
-            sd->data_start += sd->blk_len;
-            sd->data_offset = 0;
+        if (sd->data_offset == 0) {
+            /* Start of the block - lets check the address is valid */
             if (sd->data_start + sd->blk_len > sd->size) {
                 sd->card_status |= ADDRESS_ERROR;
                 break;
@@ -1466,6 +1458,15 @@ void sd_write_data(SDState *sd, uint8_t value)
                 sd->card_status |= WP_VIOLATION;
                 break;
             }
+        }
+        sd->data[sd->data_offset++] = value;
+        if (sd->data_offset >= sd->blk_len) {
+            /* TODO: Check CRC before committing */
+            sd->state = sd_programming_state;
+            BLK_WRITE_BLOCK(sd->data_start, sd->data_offset);
+            sd->blk_written++;
+            sd->data_start += sd->blk_len;
+            sd->data_offset = 0;
             sd->csd[14] |= 0x40;
 
             /* Bzzzzzzztt .... Operation complete.  */

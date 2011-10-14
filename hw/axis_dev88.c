@@ -30,13 +30,15 @@
 #include "loader.h"
 #include "elf.h"
 #include "cris-boot.h"
+#include "blockdev.h"
+#include "exec-memory.h"
 
 #define D(x)
 #define DNAND(x)
 
 struct nand_state_t
 {
-    NANDFlashState *nand;
+    DeviceState *nand;
     unsigned int rdy:1;
     unsigned int ale:1;
     unsigned int cle:1;
@@ -251,14 +253,16 @@ void axisdev88_init (ram_addr_t ram_size,
     CPUState *env;
     DeviceState *dev;
     SysBusDevice *s;
+    DriveInfo *nand;
     qemu_irq irq[30], nmi[2], *cpu_irq;
     void *etraxfs_dmac;
-    struct etraxfs_dma_client *eth[2] = {NULL, NULL};
+    struct etraxfs_dma_client *dma_eth;
     int i;
     int nand_regs;
     int gpio_regs;
-    ram_addr_t phys_ram;
-    ram_addr_t phys_intmem;
+    MemoryRegion *address_space_mem = get_system_memory();
+    MemoryRegion *phys_ram = g_new(MemoryRegion, 1);
+    MemoryRegion *phys_intmem = g_new(MemoryRegion, 1);
 
     /* init CPUs */
     if (cpu_model == NULL) {
@@ -267,18 +271,18 @@ void axisdev88_init (ram_addr_t ram_size,
     env = cpu_init(cpu_model);
 
     /* allocate RAM */
-    phys_ram = qemu_ram_alloc(NULL, "axisdev88.ram", ram_size);
-    cpu_register_physical_memory(0x40000000, ram_size, phys_ram | IO_MEM_RAM);
+    memory_region_init_ram(phys_ram, NULL, "axisdev88.ram", ram_size);
+    memory_region_add_subregion(address_space_mem, 0x40000000, phys_ram);
 
     /* The ETRAX-FS has 128Kb on chip ram, the docs refer to it as the 
        internal memory.  */
-    phys_intmem = qemu_ram_alloc(NULL, "axisdev88.chipram", INTMEM_SIZE);
-    cpu_register_physical_memory(0x38000000, INTMEM_SIZE,
-                                 phys_intmem | IO_MEM_RAM);
-
+    memory_region_init_ram(phys_intmem, NULL, "axisdev88.chipram", INTMEM_SIZE);
+    memory_region_add_subregion(address_space_mem, 0x38000000, phys_intmem);
 
       /* Attach a NAND flash to CS1.  */
-    nand_state.nand = nand_init(NAND_MFR_STMICRO, 0x39);
+    nand = drive_get(IF_MTD, 0, 0);
+    nand_state.nand = nand_init(nand ? nand->bdrv : NULL,
+                                NAND_MFR_STMICRO, 0x39);
     nand_regs = cpu_register_io_memory(nand_read, nand_write, &nand_state,
                                        DEVICE_NATIVE_ENDIAN);
     cpu_register_physical_memory(0x10000000, 0x05000000, nand_regs);
@@ -311,16 +315,18 @@ void axisdev88_init (ram_addr_t ram_size,
     }
 
     /* Add the two ethernet blocks.  */
-    eth[0] = etraxfs_eth_init(&nd_table[0], 0x30034000, 1);
-    if (nb_nics > 1)
-        eth[1] = etraxfs_eth_init(&nd_table[1], 0x30036000, 2);
+    dma_eth = g_malloc0(sizeof dma_eth[0] * 4); /* Allocate 4 channels.  */
+    etraxfs_eth_init(&nd_table[0], 0x30034000, 1, &dma_eth[0], &dma_eth[1]);
+    if (nb_nics > 1) {
+        etraxfs_eth_init(&nd_table[1], 0x30036000, 2, &dma_eth[2], &dma_eth[3]);
+    }
 
     /* The DMA Connector block is missing, hardwire things for now.  */
-    etraxfs_dmac_connect_client(etraxfs_dmac, 0, eth[0]);
-    etraxfs_dmac_connect_client(etraxfs_dmac, 1, eth[0] + 1);
-    if (eth[1]) {
-        etraxfs_dmac_connect_client(etraxfs_dmac, 6, eth[1]);
-        etraxfs_dmac_connect_client(etraxfs_dmac, 7, eth[1] + 1);
+    etraxfs_dmac_connect_client(etraxfs_dmac, 0, &dma_eth[0]);
+    etraxfs_dmac_connect_client(etraxfs_dmac, 1, &dma_eth[1]);
+    if (nb_nics > 1) {
+        etraxfs_dmac_connect_client(etraxfs_dmac, 6, &dma_eth[2]);
+        etraxfs_dmac_connect_client(etraxfs_dmac, 7, &dma_eth[3]);
     }
 
     /* 2 timers.  */
@@ -346,6 +352,7 @@ static QEMUMachine axisdev88_machine = {
     .name = "axis-dev88",
     .desc = "AXIS devboard 88",
     .init = axisdev88_init,
+    .is_default = 1,
 };
 
 static void axisdev88_machine_init(void)

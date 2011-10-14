@@ -324,6 +324,7 @@ typedef struct VMStateSubsection {
 
 struct VMStateDescription {
     const char *name;
+    int unmigratable;
     int version_id;
     int minimum_version_id;
     int minimum_version_id_old;
@@ -698,6 +699,26 @@ extern const VMStateDescription vmstate_ptimer;
     .size       = sizeof(ptimer_state *),                            \
     .flags      = VMS_STRUCT|VMS_POINTER,                            \
     .offset     = vmstate_offset_pointer(_state, _field, ptimer_state), \
+}
+
+extern const VMStateDescription vmstate_hid_keyboard_device;
+
+#define VMSTATE_HID_KEYBOARD_DEVICE(_field, _state) {                \
+    .name       = (stringify(_field)),                               \
+    .size       = sizeof(HIDState),                                  \
+    .vmsd       = &vmstate_hid_keyboard_device,                      \
+    .flags      = VMS_STRUCT,                                        \
+    .offset     = vmstate_offset_value(_state, _field, HIDState),    \
+}
+
+extern const VMStateDescription vmstate_hid_ptr_device;
+
+#define VMSTATE_HID_POINTER_DEVICE(_field, _state) {                 \
+    .name       = (stringify(_field)),                               \
+    .size       = sizeof(HIDState),                                  \
+    .vmsd       = &vmstate_hid_ptr_device,                           \
+    .flags      = VMS_STRUCT,                                        \
+    .offset     = vmstate_offset_value(_state, _field, HIDState),    \
 }
 
 /* _f : field name

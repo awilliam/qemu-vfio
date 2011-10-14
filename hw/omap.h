@@ -17,6 +17,7 @@
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 #ifndef hw_omap_h
+#include "memory.h"
 # define hw_omap_h		"omap.h"
 
 # define OMAP_EMIFS_BASE	0x00000000
@@ -93,20 +94,10 @@ struct omap_target_agent_s *omap_l4ta_get(
     int cs);
 target_phys_addr_t omap_l4_attach(struct omap_target_agent_s *ta, int region,
                 int iotype);
+target_phys_addr_t omap_l4_region_base(struct omap_target_agent_s *ta,
+                                       int region);
 int l4_register_io_memory(CPUReadMemoryFunc * const *mem_read,
                 CPUWriteMemoryFunc * const *mem_write, void *opaque);
-
-/* OMAP interrupt controller */
-struct omap_intr_handler_s;
-struct omap_intr_handler_s *omap_inth_init(target_phys_addr_t base,
-                unsigned long size, unsigned char nbanks, qemu_irq **pins,
-                qemu_irq parent_irq, qemu_irq parent_fiq, omap_clk clk);
-struct omap_intr_handler_s *omap2_inth_init(target_phys_addr_t base,
-                int size, int nbanks, qemu_irq **pins,
-                qemu_irq parent_irq, qemu_irq parent_fiq,
-                omap_clk fclk, omap_clk iclk);
-void omap_inth_reset(struct omap_intr_handler_s *s);
-qemu_irq omap_inth_get_pin(struct omap_intr_handler_s *s, int n);
 
 /* OMAP2 SDRAM controller */
 struct omap_sdrc_s;
@@ -115,11 +106,12 @@ void omap_sdrc_reset(struct omap_sdrc_s *s);
 
 /* OMAP2 general purpose memory controller */
 struct omap_gpmc_s;
-struct omap_gpmc_s *omap_gpmc_init(target_phys_addr_t base, qemu_irq irq);
+struct omap_gpmc_s *omap_gpmc_init(struct omap_mpu_state_s *mpu,
+                                   target_phys_addr_t base,
+                                   qemu_irq irq, qemu_irq drq);
 void omap_gpmc_reset(struct omap_gpmc_s *s);
-void omap_gpmc_attach(struct omap_gpmc_s *s, int cs, int iomemtype,
-                void (*base_upd)(void *opaque, target_phys_addr_t new),
-                void (*unmap)(void *opaque), void *opaque);
+void omap_gpmc_attach(struct omap_gpmc_s *s, int cs, MemoryRegion *iomem);
+void omap_gpmc_attach_nand(struct omap_gpmc_s *s, int cs, DeviceState *nand);
 
 /*
  * Common IRQ numbers for level 1 interrupt handler
@@ -674,28 +666,13 @@ void omap_uart_reset(struct omap_uart_s *s);
 void omap_uart_attach(struct omap_uart_s *s, CharDriverState *chr);
 
 struct omap_mpuio_s;
-struct omap_mpuio_s *omap_mpuio_init(target_phys_addr_t base,
+struct omap_mpuio_s *omap_mpuio_init(MemoryRegion *system_memory,
+                target_phys_addr_t base,
                 qemu_irq kbd_int, qemu_irq gpio_int, qemu_irq wakeup,
                 omap_clk clk);
 qemu_irq *omap_mpuio_in_get(struct omap_mpuio_s *s);
 void omap_mpuio_out_set(struct omap_mpuio_s *s, int line, qemu_irq handler);
 void omap_mpuio_key(struct omap_mpuio_s *s, int row, int col, int down);
-
-/* omap1 gpio module interface */
-struct omap_gpio_s;
-struct omap_gpio_s *omap_gpio_init(target_phys_addr_t base,
-                qemu_irq irq, omap_clk clk);
-void omap_gpio_reset(struct omap_gpio_s *s);
-qemu_irq *omap_gpio_in_get(struct omap_gpio_s *s);
-void omap_gpio_out_set(struct omap_gpio_s *s, int line, qemu_irq handler);
-
-/* omap2 gpio interface */
-struct omap_gpif_s;
-struct omap_gpif_s *omap2_gpio_init(struct omap_target_agent_s *ta,
-                qemu_irq *irq, omap_clk *fclk, omap_clk iclk, int modules);
-void omap_gpif_reset(struct omap_gpif_s *s);
-qemu_irq *omap2_gpio_in_get(struct omap_gpif_s *s, int start);
-void omap2_gpio_out_set(struct omap_gpif_s *s, int line, qemu_irq handler);
 
 struct uWireSlave {
     uint16_t (*receive)(void *opaque);
@@ -703,8 +680,6 @@ struct uWireSlave {
     void *opaque;
 };
 struct omap_uwire_s;
-struct omap_uwire_s *omap_uwire_init(target_phys_addr_t base,
-                qemu_irq *irq, qemu_irq dma, omap_clk clk);
 void omap_uwire_attach(struct omap_uwire_s *s,
                 uWireSlave *slave, int chipselect);
 
@@ -742,8 +717,6 @@ struct I2SCodec {
     } in, out;
 };
 struct omap_mcbsp_s;
-struct omap_mcbsp_s *omap_mcbsp_init(target_phys_addr_t base,
-                qemu_irq *irq, qemu_irq *dma, omap_clk clk);
 void omap_mcbsp_i2s_attach(struct omap_mcbsp_s *s, I2SCodec *slave);
 
 void omap_tap_init(struct omap_target_agent_s *ta,
@@ -753,8 +726,7 @@ void omap_tap_init(struct omap_target_agent_s *ta,
 struct omap_lcd_panel_s;
 void omap_lcdc_reset(struct omap_lcd_panel_s *s);
 struct omap_lcd_panel_s *omap_lcdc_init(target_phys_addr_t base, qemu_irq irq,
-                struct omap_dma_lcd_channel_s *dma,
-                ram_addr_t imif_base, ram_addr_t emiff_base, omap_clk clk);
+                struct omap_dma_lcd_channel_s *dma, omap_clk clk);
 
 /* omap_dss.c */
 struct rfbi_chip_s {
@@ -801,6 +773,7 @@ i2c_bus *omap_i2c_bus(struct omap_i2c_s *s);
 # define cpu_is_omap2420(cpu)		(cpu->mpu_model == omap2420)
 # define cpu_is_omap2430(cpu)		(cpu->mpu_model == omap2430)
 # define cpu_is_omap3430(cpu)		(cpu->mpu_model == omap3430)
+# define cpu_is_omap3630(cpu)           (cpu->mpu_model == omap3630)
 
 # define cpu_is_omap15xx(cpu)		\
         (cpu_is_omap310(cpu) || cpu_is_omap1510(cpu))
@@ -812,7 +785,8 @@ i2c_bus *omap_i2c_bus(struct omap_i2c_s *s);
 # define cpu_class_omap1(cpu)		\
         (cpu_is_omap15xx(cpu) || cpu_is_omap16xx(cpu))
 # define cpu_class_omap2(cpu)		cpu_is_omap24xx(cpu)
-# define cpu_class_omap3(cpu)		cpu_is_omap3430(cpu)
+# define cpu_class_omap3(cpu) \
+        (cpu_is_omap3430(cpu) || cpu_is_omap3630(cpu))
 
 struct omap_mpu_state_s {
     enum omap_mpu_model {
@@ -826,14 +800,30 @@ struct omap_mpu_state_s {
         omap2423,
         omap2430,
         omap3430,
+        omap3630,
     } mpu_model;
 
     CPUState *env;
 
-    qemu_irq *irq[2];
     qemu_irq *drq;
 
     qemu_irq wakeup;
+
+    MemoryRegion ulpd_pm_iomem;
+    MemoryRegion pin_cfg_iomem;
+    MemoryRegion id_iomem;
+    MemoryRegion id_iomem_e18;
+    MemoryRegion id_iomem_ed4;
+    MemoryRegion id_iomem_e20;
+    MemoryRegion mpui_iomem;
+    MemoryRegion tcmi_iomem;
+    MemoryRegion clkm_iomem;
+    MemoryRegion clkdsp_iomem;
+    MemoryRegion pwl_iomem;
+    MemoryRegion pwt_iomem;
+    MemoryRegion mpui_io_iomem;
+    MemoryRegion imif_ram;
+    MemoryRegion emiff_ram;
 
     struct omap_dma_port_if_s {
         uint32_t (*read[3])(struct omap_mpu_state_s *s,
@@ -850,7 +840,7 @@ struct omap_mpu_state_s {
     /* MPUI-TIPB peripherals */
     struct omap_uart_s *uart[3];
 
-    struct omap_gpio_s *gpio;
+    DeviceState *gpio;
 
     struct omap_mcbsp_s *mcbsp1;
     struct omap_mcbsp_s *mcbsp3;
@@ -887,7 +877,7 @@ struct omap_mpu_state_s {
     struct omap_lpg_s *led[2];
 
     /* MPU private TIPB peripherals */
-    struct omap_intr_handler_s *ih[2];
+    DeviceState *ih[2];
 
     struct soc_dma_s *dma;
 
@@ -916,6 +906,7 @@ struct omap_mpu_state_s {
     uint32_t tcmi_regs[17];
 
     struct dpll_ctl_s {
+        MemoryRegion iomem;
         uint16_t mode;
         omap_clk dpll;
     } dpll[3];
@@ -948,8 +939,6 @@ struct omap_mpu_state_s {
     struct omap_gpmc_s *gpmc;
     struct omap_sysctl_s *sysc;
 
-    struct omap_gpif_s *gpif;
-
     struct omap_mcspi_s *mcspi[2];
 
     struct omap_dss_s *dss;
@@ -958,7 +947,8 @@ struct omap_mpu_state_s {
 };
 
 /* omap1.c */
-struct omap_mpu_state_s *omap310_mpu_init(unsigned long sdram_size,
+struct omap_mpu_state_s *omap310_mpu_init(MemoryRegion *system_memory,
+                unsigned long sdram_size,
                 const char *core);
 
 /* omap2.c */
@@ -1123,7 +1113,7 @@ inline static int debug_register_io_memory(CPUReadMemoryFunc * const *mem_read,
                                            CPUWriteMemoryFunc * const *mem_write,
                                            void *opaque)
 {
-    struct io_fn *s = qemu_malloc(sizeof(struct io_fn));
+    struct io_fn *s = g_malloc(sizeof(struct io_fn));
 
     s->mem_read = mem_read;
     s->mem_write = mem_write;

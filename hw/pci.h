@@ -6,6 +6,7 @@
 #include "notify.h"
 
 #include "qdev.h"
+#include "memory.h"
 
 /* PCI includes legacy ISA access.  */
 #include "isa.h"
@@ -90,10 +91,9 @@ typedef struct PCIIORegion {
     pcibus_t addr; /* current PCI mapping address. -1 means not mapped */
 #define PCI_BAR_UNMAPPED (~(pcibus_t)0)
     pcibus_t size;
-    pcibus_t filtered_size;
     uint8_t type;
-    PCIMapIORegionFunc *map_func;
-    ram_addr_t ram_addr;
+    MemoryRegion *memory;
+    MemoryRegion *address_space;
 } PCIIORegion;
 
 #define PCI_ROM_SLOT 6
@@ -174,7 +174,7 @@ struct PCIDevice {
     /* Space to store MSIX table */
     uint8_t *msix_table_page;
     /* MMIO index used to map MSIX table and pending bit entries. */
-    int msix_mmio_index;
+    MemoryRegion msix_mmio;
     /* Reference-count for entries actually in use by driver. */
     unsigned *msix_entry_used;
     /* Region including the MSI-X table */
@@ -190,7 +190,8 @@ struct PCIDevice {
 
     /* Location of option rom */
     char *romfile;
-    ram_addr_t rom_offset;
+    bool has_rom;
+    MemoryRegion rom;
     uint32_t rom_bar;
 };
 
@@ -200,10 +201,8 @@ PCIDevice *pci_register_device(PCIBus *bus, const char *name,
                                PCIConfigWriteFunc *config_write);
 
 void pci_register_bar(PCIDevice *pci_dev, int region_num,
-                            pcibus_t size, uint8_t type,
-                            PCIMapIORegionFunc *map_func);
-void pci_register_bar_simple(PCIDevice *pci_dev, int region_num,
-                             pcibus_t size, uint8_t attr, ram_addr_t ram_addr);
+                      uint8_t attr, MemoryRegion *memory);
+pcibus_t pci_get_bar_addr(PCIDevice *pci_dev, int region_num);
 
 void pci_map_option_rom(PCIDevice *pdev, int region_num, pcibus_t addr,
                         pcibus_t size, int type);
@@ -212,8 +211,6 @@ int pci_add_capability(PCIDevice *pdev, uint8_t cap_id,
                        uint8_t offset, uint8_t size);
 
 void pci_del_capability(PCIDevice *pci_dev, uint8_t cap_id, uint8_t cap_size);
-
-void pci_reserve_capability(PCIDevice *pci_dev, uint8_t offset, uint8_t size);
 
 uint8_t pci_find_capability(PCIDevice *pci_dev, uint8_t cap_id);
 
@@ -225,6 +222,8 @@ void pci_default_write_config(PCIDevice *d,
 void pci_device_save(PCIDevice *s, QEMUFile *f);
 int pci_device_load(PCIDevice *s, QEMUFile *f);
 int pci_get_irq(PCIDevice *pci_dev, int pin);
+MemoryRegion *pci_address_space(PCIDevice *dev);
+MemoryRegion *pci_address_space_io(PCIDevice *dev);
 
 typedef void (*pci_set_irq_fn)(void *opaque, int irq_num, int level);
 typedef int (*pci_get_irq_fn)(void *opaque, int irq_num);
@@ -239,10 +238,17 @@ typedef enum {
 typedef int (*pci_hotplug_fn)(DeviceState *qdev, PCIDevice *pci_dev,
                               PCIHotplugState state);
 void pci_bus_new_inplace(PCIBus *bus, DeviceState *parent,
-                         const char *name, uint8_t devfn_min);
-PCIBus *pci_bus_new(DeviceState *parent, const char *name, uint8_t devfn_min);
+                         const char *name,
+                         MemoryRegion *address_space_mem,
+                         MemoryRegion *address_space_io,
+                         uint8_t devfn_min);
+PCIBus *pci_bus_new(DeviceState *parent, const char *name,
+                    MemoryRegion *address_space_mem,
+                    MemoryRegion *address_space_io,
+                    uint8_t devfn_min);
 void pci_bus_irqs(PCIBus *bus, pci_set_irq_fn set_irq, pci_get_irq_fn get_irq,
-                  pci_map_irq_fn map_irq, void *irq_opaque, int nirq);
+                  pci_map_irq_fn map_irq,
+                  void *irq_opaque, int nirq);
 int pci_bus_get_irq_level(PCIBus *bus, int irq_num);
 void pci_add_irq_update_notifier(PCIDevice *d, Notifier *notify);
 void pci_remove_irq_update_notifier(PCIDevice *d, Notifier *notify);
@@ -250,12 +256,13 @@ void pci_bus_update_irqs(PCIBus *bus);
 void pci_bus_hotplug(PCIBus *bus, pci_hotplug_fn hotplug, DeviceState *dev);
 PCIBus *pci_register_bus(DeviceState *parent, const char *name,
                          pci_set_irq_fn set_irq, pci_get_irq_fn get_irq,
-                         pci_map_irq_fn map_irq, void *irq_opaque,
+                         pci_map_irq_fn map_irq,
+                         void *irq_opaque,
+                         MemoryRegion *address_space_mem,
+                         MemoryRegion *address_space_io,
                          uint8_t devfn_min, int nirq);
 void pci_device_reset(PCIDevice *dev);
 void pci_bus_reset(PCIBus *bus);
-
-void pci_bus_set_mem_base(PCIBus *bus, target_phys_addr_t base);
 
 PCIDevice *pci_nic_init(NICInfo *nd, const char *default_model,
                         const char *default_devaddr);
@@ -277,7 +284,6 @@ int pci_read_devaddr(Monitor *mon, const char *addr, int *domp, int *busp,
 
 void do_pci_info_print(Monitor *mon, const QObject *data);
 void do_pci_info(Monitor *mon, QObject **ret_data);
-void pci_bridge_update_mappings(PCIBus *b);
 
 void pci_device_deassert_intx(PCIDevice *dev);
 

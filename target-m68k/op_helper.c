@@ -16,7 +16,8 @@
  * You should have received a copy of the GNU Lesser General Public
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
-#include "exec.h"
+#include "cpu.h"
+#include "dyngen-exec.h"
 #include "helpers.h"
 
 #if defined(CONFIG_USER_ONLY)
@@ -33,6 +34,8 @@ void do_interrupt_m68k_hardirq(CPUState *env1)
 #else
 
 extern int semihosting_enabled;
+
+#include "softmmu_exec.h"
 
 #define MMUSUFFIX _mmu
 
@@ -52,18 +55,17 @@ extern int semihosting_enabled;
    NULL, it means that the function was called in C code (i.e. not
    from generated code or from helper.c) */
 /* XXX: fix it to restore all registers */
-void tlb_fill (target_ulong addr, int is_write, int mmu_idx, void *retaddr)
+void tlb_fill(CPUState *env1, target_ulong addr, int is_write, int mmu_idx,
+              void *retaddr)
 {
     TranslationBlock *tb;
     CPUState *saved_env;
     unsigned long pc;
     int ret;
 
-    /* XXX: hack to restore env in all cases, even if not called from
-       generated code */
     saved_env = env;
-    env = cpu_single_env;
-    ret = cpu_m68k_handle_mmu_fault(env, addr, is_write, mmu_idx, 1);
+    env = env1;
+    ret = cpu_m68k_handle_mmu_fault(env, addr, is_write, mmu_idx);
     if (unlikely(ret)) {
         if (retaddr) {
             /* now we have a real cpu fault */

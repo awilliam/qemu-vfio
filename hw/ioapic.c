@@ -106,7 +106,6 @@ static void ioapic_service(IOAPICState *s)
     uint64_t entry;
     uint8_t dest;
     uint8_t dest_mode;
-    uint8_t polarity;
 
     for (i = 0; i < IOAPIC_NUM_PINS; i++) {
         mask = 1 << i;
@@ -118,7 +117,6 @@ static void ioapic_service(IOAPICState *s)
                 dest_mode = (entry >> IOAPIC_LVT_DEST_MODE_SHIFT) & 1;
                 delivery_mode =
                     (entry >> IOAPIC_LVT_DELIV_MODE_SHIFT) & IOAPIC_DM_MASK;
-                polarity = (entry >> IOAPIC_LVT_POLARITY_SHIFT) & 1;
                 if (trig_mode == IOAPIC_TRIGGER_EDGE) {
                     s->irr &= ~mask;
                 } else {
@@ -130,7 +128,7 @@ static void ioapic_service(IOAPICState *s)
                     vector = entry & IOAPIC_VECTOR_MASK;
                 }
                 apic_deliver_irq(dest, dest_mode, delivery_mode,
-                                 vector, polarity, trig_mode);
+                                 vector, trig_mode);
             }
         }
     }
@@ -152,6 +150,9 @@ static void ioapic_set_irq(void *opaque, int vector, int level)
         uint32_t mask = 1 << vector;
         uint64_t entry = s->ioredtbl[vector];
 
+        if (entry & (1 << IOAPIC_LVT_POLARITY_SHIFT)) {
+            level = !level;
+        }
         if (((entry >> IOAPIC_LVT_TRIGGER_MODE_SHIFT) & 1) ==
             IOAPIC_TRIGGER_LEVEL) {
             /* level triggered */
@@ -191,7 +192,7 @@ void ioapic_eoi_broadcast(int vector)
                 if (!(entry & IOAPIC_LVT_MASKED) && (s->irr & (1 << n))) {
                     ioapic_service(s);
                 }
-                notifier_list_notify(&s->eoi_notifiers[n]);
+                notifier_list_notify(&s->eoi_notifiers[n], NULL);
             }
         }
     }

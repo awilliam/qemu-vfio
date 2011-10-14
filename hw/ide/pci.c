@@ -27,7 +27,6 @@
 #include <hw/pci.h>
 #include <hw/isa.h>
 #include "block.h"
-#include "block_int.h"
 #include "dma.h"
 
 #include <hw/ide/pci.h>
@@ -223,7 +222,7 @@ static void bmdma_restart_bh(void *opaque)
     }
 }
 
-static void bmdma_restart_cb(void *opaque, int running, int reason)
+static void bmdma_restart_cb(void *opaque, int running, RunState state)
 {
     IDEDMA *dma = opaque;
     BMDMAState *bm = DO_UPCAST(BMDMAState, dma, dma);
@@ -287,9 +286,8 @@ static void bmdma_irq(void *opaque, int n, int level)
     qemu_set_irq(bm->irq, level);
 }
 
-void bmdma_cmd_writeb(void *opaque, uint32_t addr, uint32_t val)
+void bmdma_cmd_writeb(BMDMAState *bm, uint32_t val)
 {
-    BMDMAState *bm = opaque;
 #ifdef DEBUG_IDE
     printf("%s: 0x%08x\n", __func__, val);
 #endif
@@ -328,22 +326,24 @@ void bmdma_cmd_writeb(void *opaque, uint32_t addr, uint32_t val)
     bm->cmd = val & 0x09;
 }
 
-static void bmdma_addr_read(IORange *ioport, uint64_t addr,
-                            unsigned width, uint64_t *data)
+static uint64_t bmdma_addr_read(void *opaque, target_phys_addr_t addr,
+                                unsigned width)
 {
-    BMDMAState *bm = container_of(ioport, BMDMAState, addr_ioport);
+    BMDMAState *bm = opaque;
     uint32_t mask = (1ULL << (width * 8)) - 1;
+    uint64_t data;
 
-    *data = (bm->addr >> (addr * 8)) & mask;
+    data = (bm->addr >> (addr * 8)) & mask;
 #ifdef DEBUG_IDE
     printf("%s: 0x%08x\n", __func__, (unsigned)*data);
 #endif
+    return data;
 }
 
-static void bmdma_addr_write(IORange *ioport, uint64_t addr,
-                             unsigned width, uint64_t data)
+static void bmdma_addr_write(void *opaque, target_phys_addr_t addr,
+                             uint64_t data, unsigned width)
 {
-    BMDMAState *bm = container_of(ioport, BMDMAState, addr_ioport);
+    BMDMAState *bm = opaque;
     int shift = addr * 8;
     uint32_t mask = (1ULL << (width * 8)) - 1;
 
@@ -354,9 +354,10 @@ static void bmdma_addr_write(IORange *ioport, uint64_t addr,
     bm->addr |= ((data & mask) << shift) & ~3;
 }
 
-const IORangeOps bmdma_addr_ioport_ops = {
+MemoryRegionOps bmdma_addr_ioport_ops = {
     .read = bmdma_addr_read,
     .write = bmdma_addr_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
 static bool ide_bmdma_current_needed(void *opaque)
@@ -514,7 +515,7 @@ static const struct IDEDMAOps bmdma_ops = {
     .reset = bmdma_reset,
 };
 
-void bmdma_init(IDEBus *bus, BMDMAState *bm)
+void bmdma_init(IDEBus *bus, BMDMAState *bm, PCIIDEState *d)
 {
     qemu_irq *irq;
 
@@ -527,4 +528,5 @@ void bmdma_init(IDEBus *bus, BMDMAState *bm)
     bm->irq = bus->irq;
     irq = qemu_allocate_irqs(bmdma_irq, bm, 1);
     bus->irq = *irq;
+    bm->pci_dev = d;
 }

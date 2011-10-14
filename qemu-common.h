@@ -2,16 +2,13 @@
 #ifndef QEMU_COMMON_H
 #define QEMU_COMMON_H
 
+#include "compiler.h"
 #include "config-host.h"
 
-#define QEMU_NORETURN __attribute__ ((__noreturn__))
-#ifdef CONFIG_GCC_ATTRIBUTE_WARN_UNUSED_RESULT
-#define QEMU_WARN_UNUSED_RESULT __attribute__((warn_unused_result))
-#else
-#define QEMU_WARN_UNUSED_RESULT
+#if defined(__arm__) || defined(__sparc__) || defined(__mips__) || defined(__hppa__) || defined(__ia64__)
+#define WORDS_ALIGNED
 #endif
 
-#define QEMU_BUILD_BUG_ON(x) typedef char __build_bug_on__##__LINE__[(x)?-1:1];
 #define TFR(expr) do { if ((expr) != -1) break; } while (errno == EINTR)
 
 typedef struct QEMUTimer QEMUTimer;
@@ -40,6 +37,7 @@ typedef struct Monitor Monitor;
 #include <sys/time.h>
 #include <assert.h>
 #include <signal.h>
+#include <glib.h>
 
 #ifdef _WIN32
 #include "qemu-os-win32.h"
@@ -82,22 +80,6 @@ struct iovec {
 #include <sys/uio.h>
 #endif
 
-#if defined __GNUC__
-# if (__GNUC__ < 4) || \
-     defined(__GNUC_MINOR__) && (__GNUC__ == 4) && (__GNUC_MINOR__ < 4)
-   /* gcc versions before 4.4.x don't support gnu_printf, so use printf. */
-#  define GCC_ATTR __attribute__((__unused__, format(printf, 1, 2)))
-#  define GCC_FMT_ATTR(n, m) __attribute__((format(printf, n, m)))
-# else
-   /* Use gnu_printf when supported (qemu uses standard format strings). */
-#  define GCC_ATTR __attribute__((__unused__, format(gnu_printf, 1, 2)))
-#  define GCC_FMT_ATTR(n, m) __attribute__((format(gnu_printf, n, m)))
-# endif
-#else
-#define GCC_ATTR /**/
-#define GCC_FMT_ATTR(n, m)
-#endif
-
 typedef int (*fprintf_function)(FILE *f, const char *fmt, ...)
     GCC_FMT_ATTR(2, 3);
 
@@ -133,10 +115,6 @@ int qemu_main(int argc, char **argv, char **envp);
 
 /* bottom halves */
 typedef void QEMUBHFunc(void *opaque);
-
-void async_context_push(void);
-void async_context_pop(void);
-int get_async_context_id(void);
 
 QEMUBH *qemu_bh_new(QEMUBHFunc *cb, void *opaque);
 void qemu_bh_schedule(QEMUBH *bh);
@@ -180,6 +158,8 @@ int fcntl_setfl(int fd, int flag);
 #define STRTOSZ_DEFSUFFIX_B	'B'
 int64_t strtosz(const char *nptr, char **end);
 int64_t strtosz_suffix(const char *nptr, char **end, const char default_suffix);
+int64_t strtosz_suffix_unit(const char *nptr, char **end,
+                            const char default_suffix, int64_t unit);
 
 /* path.c */
 void init_paths(const char *prefix);
@@ -202,12 +182,6 @@ const char *path(const char *pathname);
 #define qemu_toascii(c)		toascii((unsigned char)(c))
 
 void *qemu_oom_check(void *ptr);
-void *qemu_malloc(size_t size);
-void *qemu_realloc(void *ptr, size_t size);
-void *qemu_mallocz(size_t size);
-void qemu_free(void *ptr);
-char *qemu_strdup(const char *str);
-char *qemu_strndup(const char *str, size_t size);
 
 void qemu_mutex_lock_iothread(void);
 void qemu_mutex_unlock_iothread(void);
@@ -221,6 +195,12 @@ void qemu_set_cloexec(int fd);
 int qemu_add_child_watch(pid_t pid);
 int qemu_eventfd(int pipefd[2]);
 int qemu_pipe(int pipefd[2]);
+#endif
+
+#ifdef _WIN32
+#define qemu_recv(sockfd, buf, len, flags) recv(sockfd, (void *)buf, len, flags)
+#else
+#define qemu_recv(sockfd, buf, len, flags) recv(sockfd, buf, len, flags)
 #endif
 
 /* Error handling.  */
@@ -283,17 +263,18 @@ typedef struct I2SCodec I2SCodec;
 typedef struct SSIBus SSIBus;
 typedef struct EventNotifier EventNotifier;
 typedef struct VirtIODevice VirtIODevice;
+typedef struct QEMUSGList QEMUSGList;
 
 typedef uint64_t pcibus_t;
 
-void cpu_exec_init_all(unsigned long tb_size);
+void tcg_exec_init(unsigned long tb_size);
+bool tcg_enabled(void);
+
+void cpu_exec_init_all(void);
 
 /* CPU save/load.  */
 void cpu_save(QEMUFile *f, void *opaque);
 int cpu_load(QEMUFile *f, void *opaque, int version_id);
-
-/* Force QEMU to stop what it's doing and service IO */
-void qemu_service_io(void);
 
 /* Force QEMU to process pending events */
 void qemu_notify_event(void);

@@ -128,7 +128,7 @@ static void net_slirp_cleanup(VLANClientState *nc)
 }
 
 static NetClientInfo net_slirp_info = {
-    .type = NET_CLIENT_TYPE_SLIRP,
+    .type = NET_CLIENT_TYPE_USER,
     .size = sizeof(SlirpState),
     .receive = net_slirp_receive,
     .cleanup = net_slirp_cleanup,
@@ -240,7 +240,8 @@ static int net_slirp_init(VLANState *vlan, const char *model,
     nc = qemu_new_net_client(&net_slirp_info, vlan, NULL, model, name);
 
     snprintf(nc->info_str, sizeof(nc->info_str),
-             "net=%s, restricted=%c", inet_ntoa(net), restricted ? 'y' : 'n');
+             "net=%s,restrict=%s", inet_ntoa(net),
+             restricted ? "on" : "off");
 
     s = DO_UPCAST(SlirpState, nc, nc);
 
@@ -449,7 +450,7 @@ int net_slirp_redir(const char *redir_str)
     struct slirp_config_str *config;
 
     if (QTAILQ_EMPTY(&slirp_stacks)) {
-        config = qemu_malloc(sizeof(*config));
+        config = g_malloc(sizeof(*config));
         pstrcpy(config->str, sizeof(config->str), redir_str);
         config->flags = SLIRP_CFG_HOSTFWD | SLIRP_CFG_LEGACY;
         config->next = slirp_configs;
@@ -528,7 +529,7 @@ static int slirp_smb(SlirpState* s, const char *exported_dir,
     fclose(f);
 
     snprintf(smb_cmdline, sizeof(smb_cmdline), "%s -s %s",
-             SMBD_COMMAND, smb_conf);
+             CONFIG_SMBD_COMMAND, smb_conf);
 
     if (slirp_add_exec(s->slirp, 0, smb_cmdline, &vserver_addr, 139) < 0) {
         slirp_smb_cleanup(s);
@@ -613,19 +614,19 @@ static int slirp_guestfwd(SlirpState *s, const char *config_str,
         goto fail_syntax;
     }
 
-    fwd = qemu_malloc(sizeof(struct GuestFwd));
+    fwd = g_malloc(sizeof(struct GuestFwd));
     snprintf(buf, sizeof(buf), "guestfwd.tcp.%d", port);
-    fwd->hd = qemu_chr_open(buf, p, NULL);
+    fwd->hd = qemu_chr_new(buf, p, NULL);
     if (!fwd->hd) {
         error_report("could not open guest forwarding device '%s'", buf);
-        qemu_free(fwd);
+        g_free(fwd);
         return -1;
     }
 
     if (slirp_add_exec(s->slirp, 3, fwd->hd, &server, port) < 0) {
         error_report("conflicting/invalid host:port in guest forwarding "
                      "rule '%s'", config_str);
-        qemu_free(fwd);
+        g_free(fwd);
         return -1;
     }
     fwd->server = server;
@@ -661,7 +662,7 @@ static int net_init_slirp_configs(const char *name, const char *value, void *opa
         return 0;
     }
 
-    config = qemu_mallocz(sizeof(*config));
+    config = g_malloc0(sizeof(*config));
 
     pstrcpy(config->str, sizeof(config->str), value);
 
@@ -689,6 +690,7 @@ int net_init_slirp(QemuOpts *opts,
     const char *bootfile;
     const char *smb_export;
     const char *vsmbsrv;
+    const char *restrict_opt;
     char *vnet = NULL;
     int restricted = 0;
     int ret;
@@ -702,11 +704,23 @@ int net_init_slirp(QemuOpts *opts,
     smb_export  = qemu_opt_get(opts, "smb");
     vsmbsrv     = qemu_opt_get(opts, "smbserver");
 
+    restrict_opt = qemu_opt_get(opts, "restrict");
+    if (restrict_opt) {
+        if (!strcmp(restrict_opt, "on") ||
+            !strcmp(restrict_opt, "yes") || !strcmp(restrict_opt, "y")) {
+            restricted = 1;
+        } else if (strcmp(restrict_opt, "off") &&
+            strcmp(restrict_opt, "no") && strcmp(restrict_opt, "n")) {
+            error_report("invalid option: 'restrict=%s'", restrict_opt);
+            return -1;
+        }
+    }
+
     if (qemu_opt_get(opts, "ip")) {
         const char *ip = qemu_opt_get(opts, "ip");
         int l = strlen(ip) + strlen("/24") + 1;
 
-        vnet = qemu_malloc(l);
+        vnet = g_malloc(l);
 
         /* emulate legacy ip= parameter */
         pstrcpy(vnet, l, ip);
@@ -715,14 +729,9 @@ int net_init_slirp(QemuOpts *opts,
 
     if (qemu_opt_get(opts, "net")) {
         if (vnet) {
-            qemu_free(vnet);
+            g_free(vnet);
         }
-        vnet = qemu_strdup(qemu_opt_get(opts, "net"));
-    }
-
-    if (qemu_opt_get(opts, "restrict") &&
-        qemu_opt_get(opts, "restrict")[0] == 'y') {
-        restricted = 1;
+        vnet = g_strdup(qemu_opt_get(opts, "net"));
     }
 
     qemu_opt_foreach(opts, net_init_slirp_configs, NULL, 0);
@@ -734,10 +743,10 @@ int net_init_slirp(QemuOpts *opts,
     while (slirp_configs) {
         config = slirp_configs;
         slirp_configs = config->next;
-        qemu_free(config);
+        g_free(config);
     }
 
-    qemu_free(vnet);
+    g_free(vnet);
 
     return ret;
 }
@@ -755,7 +764,7 @@ int net_slirp_parse_legacy(QemuOptsList *opts_list, const char *optarg, int *ret
     if (QTAILQ_EMPTY(&slirp_stacks)) {
         struct slirp_config_str *config;
 
-        config = qemu_malloc(sizeof(*config));
+        config = g_malloc(sizeof(*config));
         pstrcpy(config->str, sizeof(config->str), optarg);
         config->flags = SLIRP_CFG_LEGACY;
         config->next = slirp_configs;

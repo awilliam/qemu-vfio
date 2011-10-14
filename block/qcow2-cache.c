@@ -49,9 +49,9 @@ Qcow2Cache *qcow2_cache_create(BlockDriverState *bs, int num_tables,
     Qcow2Cache *c;
     int i;
 
-    c = qemu_mallocz(sizeof(*c));
+    c = g_malloc0(sizeof(*c));
     c->size = num_tables;
-    c->entries = qemu_mallocz(sizeof(*c->entries) * num_tables);
+    c->entries = g_malloc0(sizeof(*c->entries) * num_tables);
     c->writethrough = writethrough;
 
     for (i = 0; i < c->size; i++) {
@@ -70,8 +70,8 @@ int qcow2_cache_destroy(BlockDriverState* bs, Qcow2Cache *c)
         qemu_vfree(c->entries[i].table);
     }
 
-    qemu_free(c->entries);
-    qemu_free(c);
+    g_free(c->entries);
+    g_free(c);
 
     return 0;
 }
@@ -312,3 +312,15 @@ found:
     c->entries[i].dirty = true;
 }
 
+bool qcow2_cache_set_writethrough(BlockDriverState *bs, Qcow2Cache *c,
+    bool enable)
+{
+    bool old = c->writethrough;
+
+    if (!old && enable) {
+        qcow2_cache_flush(bs, c);
+    }
+
+    c->writethrough = enable;
+    return old;
+}

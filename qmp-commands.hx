@@ -42,7 +42,7 @@ and we're going to establish a deprecation policy for badly defined commands.
 
 If you're planning to adopt QMP, please observe the following:
 
-    1. The deprecation policy will take efect and be documented soon, please
+    1. The deprecation policy will take effect and be documented soon, please
        check the documentation of each used command as soon as a new release of
        QEMU is available
 
@@ -63,10 +63,7 @@ EQMP
     {
         .name       = "quit",
         .args_type  = "",
-        .params     = "",
-        .help       = "quit the emulator",
-        .user_print = monitor_user_noop,
-        .mhandler.cmd_new = do_quit,
+        .mhandler.cmd_new = qmp_marshal_input_quit,
     },
 
 SQMP
@@ -181,10 +178,7 @@ EQMP
     {
         .name       = "stop",
         .args_type  = "",
-        .params     = "",
-        .help       = "stop emulation",
-        .user_print = monitor_user_noop,
-        .mhandler.cmd_new = do_stop,
+        .mhandler.cmd_new = qmp_marshal_input_stop,
     },
 
 SQMP
@@ -229,10 +223,7 @@ EQMP
     {
         .name       = "system_reset",
         .args_type  = "",
-        .params     = "",
-        .help       = "reset the system",
-        .user_print = monitor_user_noop,
-        .mhandler.cmd_new = do_system_reset,
+        .mhandler.cmd_new = qmp_marshal_input_system_reset,
     },
 
 SQMP
@@ -694,6 +685,40 @@ Example:
 EQMP
 
     {
+        .name       = "blockdev-snapshot-sync",
+        .args_type  = "device:B,snapshot-file:s?,format:s?",
+        .params     = "device [new-image-file] [format]",
+        .user_print = monitor_user_noop,
+        .mhandler.cmd_new = do_snapshot_blkdev,
+    },
+
+SQMP
+blockdev-snapshot-sync
+----------------------
+
+Synchronous snapshot of a block device. snapshot-file specifies the
+target of the new image. If the file exists, or if it is a device, the
+snapshot will be created in the existing file/device. If does not
+exist, a new file will be created. format specifies the format of the
+snapshot image, default is qcow2.
+
+Arguments:
+
+- "device": device name to snapshot (json-string)
+- "snapshot-file": name of new image file (json-string)
+- "format": format of new image (json-string, optional)
+
+Example:
+
+-> { "execute": "blockdev-snapshot", "arguments": { "device": "ide-hd0",
+                                                    "snapshot-file":
+                                                    "/some/place/my-image",
+                                                    "format": "qcow2" } }
+<- { "return": {} }
+
+EQMP
+
+    {
         .name       = "balloon",
         .args_type  = "value:M",
         .params     = "target",
@@ -885,6 +910,33 @@ Example:
 EQMP
 
     {
+        .name       = "add_client",
+        .args_type  = "protocol:s,fdname:s,skipauth:b?",
+        .params     = "protocol fdname skipauth",
+        .help       = "add a graphics client",
+        .user_print = monitor_user_noop,
+        .mhandler.cmd_new = add_graphics_client,
+    },
+
+SQMP
+add_client
+----------
+
+Add a graphics client
+
+Arguments:
+
+- "protocol": protocol name (json-string)
+- "fdname": file descriptor name (json-string)
+
+Example:
+
+-> { "execute": "add_client", "arguments": { "protocol": "vnc",
+                                             "fdname": "myclient" } }
+<- { "return": {} }
+
+EQMP
+    {
         .name       = "qmp_capabilities",
         .args_type  = "",
         .params     = "",
@@ -992,6 +1044,12 @@ Example:
 
 EQMP
 
+    {
+        .name       = "query-version",
+        .args_type  = "",
+        .mhandler.cmd_new = qmp_marshal_input_query_version,
+    },
+
 SQMP
 query-commands
 --------------
@@ -1023,6 +1081,12 @@ Note: This example has been shortened as the real response is too long.
 
 EQMP
 
+    {
+        .name       = "query-commands",
+        .args_type  = "",
+        .mhandler.cmd_new = qmp_marshal_input_query_commands,
+    },
+
 SQMP
 query-chardev
 -------------
@@ -1053,6 +1117,12 @@ Example:
 
 EQMP
 
+    {
+        .name       = "query-chardev",
+        .args_type  = "",
+        .mhandler.cmd_new = qmp_marshal_input_query_chardev,
+    },
+
 SQMP
 query-block
 -----------
@@ -1070,6 +1140,8 @@ Each json-object contain the following:
          - Possible values: "unknown"
 - "removable": true if the device is removable, false otherwise (json-bool)
 - "locked": true if the device is locked, false otherwise (json-bool)
+- "tray-open": only present if removable, true if the device has a tray,
+               and it is open (json-bool)
 - "inserted": only present if the device is inserted, it is a json-object
    containing the following:
          - "file": device file name (json-string)
@@ -1140,6 +1212,10 @@ Each json-object contain the following:
     - "wr_bytes": bytes written (json-int)
     - "rd_operations": read operations (json-int)
     - "wr_operations": write operations (json-int)
+    - "flush_operations": cache flush operations (json-int)
+    - "wr_total_time_ns": total time spend on writes in nano-seconds (json-int)
+    - "rd_total_time_ns": total time spend on reads in nano-seconds (json-int)
+    - "flush_total_time_ns": total time spend on cache flushes in nano-seconds (json-int)
     - "wr_highest_offset": Highest offset of a sector written since the
                            BlockDriverState has been opened (json-int)
 - "parent": Contains recursively the statistics of the underlying
@@ -1161,6 +1237,10 @@ Example:
                   "wr_operations":751,
                   "rd_bytes":122567168,
                   "rd_operations":36772
+                  "wr_total_times_ns":313253456
+                  "rd_total_times_ns":3465673657
+                  "flush_total_times_ns":49653
+                  "flush_operations":61,
                }
             },
             "stats":{
@@ -1169,6 +1249,10 @@ Example:
                "wr_operations":692,
                "rd_bytes":122739200,
                "rd_operations":36604
+               "flush_operations":51,
+               "wr_total_times_ns":313253456
+               "rd_total_times_ns":3465673657
+               "flush_total_times_ns":49653
             }
          },
          {
@@ -1179,6 +1263,10 @@ Example:
                "wr_operations":0,
                "rd_bytes":0,
                "rd_operations":0
+               "flush_operations":0,
+               "wr_total_times_ns":0
+               "rd_total_times_ns":0
+               "flush_total_times_ns":0
             }
          },
          {
@@ -1189,6 +1277,10 @@ Example:
                "wr_operations":0,
                "rd_bytes":0,
                "rd_operations":0
+               "flush_operations":0,
+               "wr_total_times_ns":0
+               "rd_total_times_ns":0
+               "flush_total_times_ns":0
             }
          },
          {
@@ -1199,6 +1291,10 @@ Example:
                "wr_operations":0,
                "rd_bytes":0,
                "rd_operations":0
+               "flush_operations":0,
+               "wr_total_times_ns":0
+               "rd_total_times_ns":0
+               "flush_total_times_ns":0
             }
          }
       ]
@@ -1477,6 +1573,12 @@ Example:
 
 EQMP
 
+    {
+        .name       = "query-kvm",
+        .args_type  = "",
+        .mhandler.cmd_new = qmp_marshal_input_query_kvm,
+    },
+
 SQMP
 query-status
 ------------
@@ -1486,13 +1588,36 @@ Return a json-object with the following information:
 - "running": true if the VM is running, or false if it is paused (json-bool)
 - "singlestep": true if the VM is in single step mode,
                 false otherwise (json-bool)
+- "status": one of the following values (json-string)
+    "debug" - QEMU is running on a debugger
+    "inmigrate" - guest is paused waiting for an incoming migration
+    "internal-error" - An internal error that prevents further guest
+    execution has occurred
+    "io-error" - the last IOP has failed and the device is configured
+    to pause on I/O errors
+    "paused" - guest has been paused via the 'stop' command
+    "postmigrate" - guest is paused following a successful 'migrate'
+    "prelaunch" - QEMU was started with -S and guest has not started
+    "finish-migrate" - guest is paused to finish the migration process
+    "restore-vm" - guest is paused to restore VM state
+    "running" - guest is actively running
+    "save-vm" - guest is paused to save the VM state
+    "shutdown" - guest is shut down (and -no-shutdown is in use)
+    "watchdog" - the watchdog action is configured to pause and
+     has been triggered
 
 Example:
 
 -> { "execute": "query-status" }
-<- { "return": { "running": true, "singlestep": false } }
+<- { "return": { "running": true, "singlestep": false, "status": "running" } }
 
 EQMP
+    
+    {
+        .name       = "query-status",
+        .args_type  = "",
+        .mhandler.cmd_new = qmp_marshal_input_query_status,
+    },
 
 SQMP
 query-mice
@@ -1676,6 +1801,12 @@ Example:
 
 EQMP
 
+    {
+        .name       = "query-name",
+        .args_type  = "",
+        .mhandler.cmd_new = qmp_marshal_input_query_name,
+    },
+
 SQMP
 query-uuid
 ----------
@@ -1692,6 +1823,12 @@ Example:
 <- { "return": { "UUID": "550e8400-e29b-41d4-a716-446655440000" } }
 
 EQMP
+
+    {
+        .name       = "query-uuid",
+        .args_type  = "",
+        .mhandler.cmd_new = qmp_marshal_input_query_uuid,
+    },
 
 SQMP
 query-migrate

@@ -4,7 +4,7 @@
  * Copyright (c) 2006 Openedhand Ltd.
  * Written by Andrzej Zaborowski <balrog@zabor.org>
  *
- * This code is licenced under the GPL.
+ * This code is licensed under the GPL.
  */
 
 #include "sysbus.h"
@@ -1764,7 +1764,7 @@ static PXA2xxI2SState *pxa2xx_i2s_init(target_phys_addr_t base,
 {
     int iomemtype;
     PXA2xxI2SState *s = (PXA2xxI2SState *)
-            qemu_mallocz(sizeof(PXA2xxI2SState));
+            g_malloc0(sizeof(PXA2xxI2SState));
 
     s->irq = irq;
     s->rx_dma = rx_dma;
@@ -1923,7 +1923,7 @@ static void pxa2xx_fir_write(void *opaque, target_phys_addr_t addr,
         else
             ch = ~value;
         if (s->chr && s->enable && (s->control[0] & (1 << 3)))	/* TXE */
-            qemu_chr_write(s->chr, &ch, 1);
+            qemu_chr_fe_write(s->chr, &ch, 1);
         break;
     case ICSR0:
         s->status[0] &= ~(value & 0x66);
@@ -2025,7 +2025,7 @@ static PXA2xxFIrState *pxa2xx_fir_init(target_phys_addr_t base,
 {
     int iomemtype;
     PXA2xxFIrState *s = (PXA2xxFIrState *)
-            qemu_mallocz(sizeof(PXA2xxFIrState));
+            g_malloc0(sizeof(PXA2xxFIrState));
 
     s->irq = irq;
     s->rx_dma = rx_dma;
@@ -2059,12 +2059,13 @@ static void pxa2xx_reset(void *opaque, int line, int level)
 }
 
 /* Initialise a PXA270 integrated chip (ARM based core).  */
-PXA2xxState *pxa270_init(unsigned int sdram_size, const char *revision)
+PXA2xxState *pxa270_init(MemoryRegion *address_space,
+                         unsigned int sdram_size, const char *revision)
 {
     PXA2xxState *s;
     int iomemtype, i;
     DriveInfo *dinfo;
-    s = (PXA2xxState *) qemu_mallocz(sizeof(PXA2xxState));
+    s = (PXA2xxState *) g_malloc0(sizeof(PXA2xxState));
 
     if (revision && strncmp(revision, "pxa27", 5)) {
         fprintf(stderr, "Machine requires a PXA27x processor.\n");
@@ -2113,19 +2114,16 @@ PXA2xxState *pxa270_init(unsigned int sdram_size, const char *revision)
                     qdev_get_gpio_in(s->dma, PXA2XX_RX_RQ_MMCI),
                     qdev_get_gpio_in(s->dma, PXA2XX_TX_RQ_MMCI));
 
-    for (i = 0; pxa270_serial[i].io_base; i ++)
-        if (serial_hds[i])
-#ifdef TARGET_WORDS_BIGENDIAN
-            serial_mm_init(pxa270_serial[i].io_base, 2,
-                            qdev_get_gpio_in(s->pic, pxa270_serial[i].irqn),
-                            14857000 / 16, serial_hds[i], 1, 1);
-#else
-            serial_mm_init(pxa270_serial[i].io_base, 2,
-                            qdev_get_gpio_in(s->pic, pxa270_serial[i].irqn),
-                            14857000 / 16, serial_hds[i], 1, 0);
-#endif
-        else
+    for (i = 0; pxa270_serial[i].io_base; i++) {
+        if (serial_hds[i]) {
+            serial_mm_init(address_space, pxa270_serial[i].io_base, 2,
+                           qdev_get_gpio_in(s->pic, pxa270_serial[i].irqn),
+                           14857000 / 16, serial_hds[i],
+                           DEVICE_NATIVE_ENDIAN);
+        } else {
             break;
+        }
+    }
     if (serial_hds[i])
         s->fir = pxa2xx_fir_init(0x40800000,
                         qdev_get_gpio_in(s->pic, PXA2XX_PIC_ICP),
@@ -2162,7 +2160,7 @@ PXA2xxState *pxa270_init(unsigned int sdram_size, const char *revision)
     vmstate_register(NULL, 0, &vmstate_pxa2xx_pm, s);
 
     for (i = 0; pxa27x_ssp[i].io_base; i ++);
-    s->ssp = (SSIBus **)qemu_mallocz(sizeof(SSIBus *) * i);
+    s->ssp = (SSIBus **)g_malloc0(sizeof(SSIBus *) * i);
     for (i = 0; pxa27x_ssp[i].io_base; i ++) {
         DeviceState *dev;
         dev = sysbus_create_simple("pxa2xx-ssp", pxa27x_ssp[i].io_base,
@@ -2201,13 +2199,13 @@ PXA2xxState *pxa270_init(unsigned int sdram_size, const char *revision)
 }
 
 /* Initialise a PXA255 integrated chip (ARM based core).  */
-PXA2xxState *pxa255_init(unsigned int sdram_size)
+PXA2xxState *pxa255_init(MemoryRegion *address_space, unsigned int sdram_size)
 {
     PXA2xxState *s;
     int iomemtype, i;
     DriveInfo *dinfo;
 
-    s = (PXA2xxState *) qemu_mallocz(sizeof(PXA2xxState));
+    s = (PXA2xxState *) g_malloc0(sizeof(PXA2xxState));
 
     s->env = cpu_init("pxa255");
     if (!s->env) {
@@ -2248,20 +2246,16 @@ PXA2xxState *pxa255_init(unsigned int sdram_size)
                     qdev_get_gpio_in(s->dma, PXA2XX_RX_RQ_MMCI),
                     qdev_get_gpio_in(s->dma, PXA2XX_TX_RQ_MMCI));
 
-    for (i = 0; pxa255_serial[i].io_base; i ++)
+    for (i = 0; pxa255_serial[i].io_base; i++) {
         if (serial_hds[i]) {
-#ifdef TARGET_WORDS_BIGENDIAN
-            serial_mm_init(pxa255_serial[i].io_base, 2,
-                            qdev_get_gpio_in(s->pic, pxa255_serial[i].irqn),
-                            14745600 / 16, serial_hds[i], 1, 1);
-#else
-            serial_mm_init(pxa255_serial[i].io_base, 2,
-                            qdev_get_gpio_in(s->pic, pxa255_serial[i].irqn),
-                            14745600 / 16, serial_hds[i], 1, 0);
-#endif
+            serial_mm_init(address_space, pxa255_serial[i].io_base, 2,
+                           qdev_get_gpio_in(s->pic, pxa255_serial[i].irqn),
+                           14745600 / 16, serial_hds[i],
+                           DEVICE_NATIVE_ENDIAN);
         } else {
             break;
         }
+    }
     if (serial_hds[i])
         s->fir = pxa2xx_fir_init(0x40800000,
                         qdev_get_gpio_in(s->pic, PXA2XX_PIC_ICP),
@@ -2298,7 +2292,7 @@ PXA2xxState *pxa255_init(unsigned int sdram_size)
     vmstate_register(NULL, 0, &vmstate_pxa2xx_pm, s);
 
     for (i = 0; pxa255_ssp[i].io_base; i ++);
-    s->ssp = (SSIBus **)qemu_mallocz(sizeof(SSIBus *) * i);
+    s->ssp = (SSIBus **)g_malloc0(sizeof(SSIBus *) * i);
     for (i = 0; pxa255_ssp[i].io_base; i ++) {
         DeviceState *dev;
         dev = sysbus_create_simple("pxa2xx-ssp", pxa255_ssp[i].io_base,

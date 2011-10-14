@@ -42,7 +42,7 @@ static int cpu_sparc_find_by_name(sparc_def_t *cpu_def, const char *cpu_model);
 #if defined(CONFIG_USER_ONLY)
 
 int cpu_sparc_handle_mmu_fault(CPUState *env1, target_ulong address, int rw,
-                               int mmu_idx, int is_softmmu)
+                               int mmu_idx)
 {
     if (rw & 2)
         env1->exception_index = TT_TFAULT;
@@ -212,7 +212,7 @@ static int get_physical_address(CPUState *env, target_phys_addr_t *physical,
 
 /* Perform address translation */
 int cpu_sparc_handle_mmu_fault (CPUState *env, target_ulong address, int rw,
-                              int mmu_idx, int is_softmmu)
+                              int mmu_idx)
 {
     target_phys_addr_t paddr;
     target_ulong vaddr;
@@ -357,6 +357,90 @@ void dump_mmu(FILE *f, fprintf_function cpu_fprintf, CPUState *env)
         }
     }
 }
+
+#if !defined(CONFIG_USER_ONLY)
+
+/* Gdb expects all registers windows to be flushed in ram. This function handles
+ * reads (and only reads) in stack frames as if windows were flushed. We assume
+ * that the sparc ABI is followed.
+ */
+int target_memory_rw_debug(CPUState *env, target_ulong addr,
+                           uint8_t *buf, int len, int is_write)
+{
+    int i;
+    int len1;
+    int cwp = env->cwp;
+
+    if (!is_write) {
+        for (i = 0; i < env->nwindows; i++) {
+            int off;
+            target_ulong fp = env->regbase[cwp * 16 + 22];
+
+            /* Assume fp == 0 means end of frame.  */
+            if (fp == 0) {
+                break;
+            }
+
+            cwp = cpu_cwp_inc(env, cwp + 1);
+
+            /* Invalid window ? */
+            if (env->wim & (1 << cwp)) {
+                break;
+            }
+
+            /* According to the ABI, the stack is growing downward.  */
+            if (addr + len < fp) {
+                break;
+            }
+
+            /* Not in this frame.  */
+            if (addr > fp + 64) {
+                continue;
+            }
+
+            /* Handle access before this window.  */
+            if (addr < fp) {
+                len1 = fp - addr;
+                if (cpu_memory_rw_debug(env, addr, buf, len1, is_write) != 0) {
+                    return -1;
+                }
+                addr += len1;
+                len -= len1;
+                buf += len1;
+            }
+
+            /* Access byte per byte to registers. Not very efficient but speed
+             * is not critical.
+             */
+            off = addr - fp;
+            len1 = 64 - off;
+
+            if (len1 > len) {
+                len1 = len;
+            }
+
+            for (; len1; len1--) {
+                int reg = cwp * 16 + 8 + (off >> 2);
+                union {
+                    uint32_t v;
+                    uint8_t c[4];
+                } u;
+                u.v = cpu_to_be32(env->regbase[reg]);
+                *buf++ = u.c[off & 3];
+                addr++;
+                len--;
+                off++;
+            }
+
+            if (len == 0) {
+                return 0;
+            }
+        }
+    }
+    return cpu_memory_rw_debug(env, addr, buf, len, is_write);
+}
+
+#endif  /* !defined(CONFIG_USER_ONLY) */
 
 #else /* !TARGET_SPARC64 */
 
@@ -638,7 +722,7 @@ static int get_physical_address(CPUState *env, target_phys_addr_t *physical,
 
 /* Perform address translation */
 int cpu_sparc_handle_mmu_fault (CPUState *env, target_ulong address, int rw,
-                              int mmu_idx, int is_softmmu)
+                              int mmu_idx)
 {
     target_ulong virt_addr, vaddr;
     target_phys_addr_t paddr;
@@ -700,7 +784,7 @@ void dump_mmu(FILE *f, fprintf_function cpu_fprintf, CPUState *env)
                 break;
             }
             if (TTE_IS_VALID(env->dtlb[i].tte)) {
-                (*cpu_fprintf)(f, "[%02u] VA: %" PRIx64 ", PA: %" PRIx64
+                (*cpu_fprintf)(f, "[%02u] VA: %" PRIx64 ", PA: %llx"
                                ", %s, %s, %s, %s, ctx %" PRId64 " %s\n",
                                i,
                                env->dtlb[i].tag & (uint64_t)~0x1fffULL,
@@ -737,7 +821,7 @@ void dump_mmu(FILE *f, fprintf_function cpu_fprintf, CPUState *env)
                 break;
             }
             if (TTE_IS_VALID(env->itlb[i].tte)) {
-                (*cpu_fprintf)(f, "[%02u] VA: %" PRIx64 ", PA: %" PRIx64
+                (*cpu_fprintf)(f, "[%02u] VA: %" PRIx64 ", PA: %llx"
                                ", %s, %s, %s, ctx %" PRId64 " %s\n",
                                i,
                                env->itlb[i].tag & (uint64_t)~0x1fffULL,
@@ -1091,7 +1175,7 @@ static int cpu_sparc_register(CPUSPARCState *env, const char *cpu_model)
     if (cpu_sparc_find_by_name(def, cpu_model) < 0)
         return -1;
 
-    env->def = qemu_mallocz(sizeof(*def));
+    env->def = g_malloc0(sizeof(*def));
     memcpy(env->def, def, sizeof(*def));
 #if defined(CONFIG_USER_ONLY)
     if ((env->def->features & CPU_FEATURE_FLOAT))
@@ -1124,7 +1208,7 @@ CPUSPARCState *cpu_sparc_init(const char *cpu_model)
 {
     CPUSPARCState *env;
 
-    env = qemu_mallocz(sizeof(CPUSPARCState));
+    env = g_malloc0(sizeof(CPUSPARCState));
     cpu_exec_init(env);
 
     gen_intermediate_code_init(env);

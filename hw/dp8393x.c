@@ -870,7 +870,7 @@ static void nic_cleanup(VLANClientState *nc)
     qemu_del_timer(s->watchdog);
     qemu_free_timer(s->watchdog);
 
-    qemu_free(s);
+    g_free(s);
 }
 
 static NetClientInfo net_dp83932_info = {
@@ -889,7 +889,7 @@ void dp83932_init(NICInfo *nd, target_phys_addr_t base, int it_shift,
 
     qemu_check_nic_model(nd, "dp83932");
 
-    s = qemu_mallocz(sizeof(dp8393xState));
+    s = g_malloc0(sizeof(dp8393xState));
 
     s->mem_opaque = mem_opaque;
     s->memory_rw = memory_rw;
@@ -898,7 +898,7 @@ void dp83932_init(NICInfo *nd, target_phys_addr_t base, int it_shift,
     s->watchdog = qemu_new_timer_ns(vm_clock, dp8393x_watchdog, s);
     s->regs[SONIC_SR] = 0x0004; /* only revision recognized by Linux */
 
-    memcpy(s->conf.macaddr.a, nd->macaddr, sizeof(s->conf.macaddr));
+    s->conf.macaddr = nd->macaddr;
     s->conf.vlan = nd->vlan;
     s->conf.peer = nd->netdev;
 

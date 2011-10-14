@@ -3,7 +3,7 @@
  *
  * Copyright (c) 2007 CodeSourcery.
  *
- * This code is licenced under the GPL
+ * This code is licensed under the GPL
  */
 #include "hw.h"
 #include "net.h"
@@ -447,7 +447,7 @@ static void mcf_fec_cleanup(VLANClientState *nc)
 
     cpu_unregister_io_memory(s->mmio_index);
 
-    qemu_free(s);
+    g_free(s);
 }
 
 static NetClientInfo net_mcf_fec_info = {
@@ -464,14 +464,14 @@ void mcf_fec_init(NICInfo *nd, target_phys_addr_t base, qemu_irq *irq)
 
     qemu_check_nic_model(nd, "mcf_fec");
 
-    s = (mcf_fec_state *)qemu_mallocz(sizeof(mcf_fec_state));
+    s = (mcf_fec_state *)g_malloc0(sizeof(mcf_fec_state));
     s->irq = irq;
     s->mmio_index = cpu_register_io_memory(mcf_fec_readfn,
                                            mcf_fec_writefn, s,
                                            DEVICE_NATIVE_ENDIAN);
     cpu_register_physical_memory(base, 0x400, s->mmio_index);
 
-    memcpy(s->conf.macaddr.a, nd->macaddr, sizeof(nd->macaddr));
+    s->conf.macaddr = nd->macaddr;
     s->conf.vlan = nd->vlan;
     s->conf.peer = nd->netdev;
 

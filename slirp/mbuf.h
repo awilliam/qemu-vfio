@@ -33,9 +33,6 @@
 #ifndef _MBUF_H_
 #define _MBUF_H_
 
-#define m_freem m_free
-
-
 #define MINCSIZE 4096	/* Amount to increase mbuf if too small */
 
 /*
@@ -85,6 +82,9 @@ struct m_hdr {
 struct mbuf {
 	struct	m_hdr m_hdr;
 	Slirp *slirp;
+	bool	arp_requested;
+	uint64_t expiration_date;
+	/* start of dynamic buffer area, must be last element */
 	union M_dat {
 		char	m_dat_[1]; /* ANSI don't like 0 sized arrays */
 		char	*m_ext_;

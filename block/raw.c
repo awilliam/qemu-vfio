@@ -75,15 +75,19 @@ static int raw_is_inserted(BlockDriverState *bs)
     return bdrv_is_inserted(bs->file);
 }
 
-static int raw_eject(BlockDriverState *bs, int eject_flag)
+static int raw_media_changed(BlockDriverState *bs)
 {
-    return bdrv_eject(bs->file, eject_flag);
+    return bdrv_media_changed(bs->file);
 }
 
-static int raw_set_locked(BlockDriverState *bs, int locked)
+static void raw_eject(BlockDriverState *bs, int eject_flag)
 {
-    bdrv_set_locked(bs->file, locked);
-    return 0;
+    bdrv_eject(bs->file, eject_flag);
+}
+
+static void raw_lock_medium(BlockDriverState *bs, bool locked)
+{
+    bdrv_lock_medium(bs->file, locked);
 }
 
 static int raw_ioctl(BlockDriverState *bs, unsigned long int req, void *buf)
@@ -120,7 +124,7 @@ static int raw_has_zero_init(BlockDriverState *bs)
 static BlockDriver bdrv_raw = {
     .format_name        = "raw",
 
-    /* It's really 0, but we need to make qemu_malloc() happy */
+    /* It's really 0, but we need to make g_malloc() happy */
     .instance_size      = 1,
 
     .bdrv_open          = raw_open,
@@ -138,8 +142,10 @@ static BlockDriver bdrv_raw = {
     .bdrv_discard       = raw_discard,
 
     .bdrv_is_inserted   = raw_is_inserted,
+    .bdrv_media_changed = raw_media_changed,
     .bdrv_eject         = raw_eject,
-    .bdrv_set_locked    = raw_set_locked,
+    .bdrv_lock_medium   = raw_lock_medium,
+
     .bdrv_ioctl         = raw_ioctl,
     .bdrv_aio_ioctl     = raw_aio_ioctl,
 

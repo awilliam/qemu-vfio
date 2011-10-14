@@ -104,7 +104,7 @@ static size_t write_to_port(VirtIOSerialPort *port,
         }
 
         len = iov_from_buf(elem.in_sg, elem.in_num,
-                           buf + offset, size - offset);
+                           buf + offset, 0, size - offset);
         offset += len;
 
         virtqueue_push(vq, &elem, len);
@@ -383,14 +383,14 @@ static void handle_control_message(VirtIOSerial *vser, void *buf, size_t len)
             stw_p(&cpkt.value, 1);
 
             buffer_len = sizeof(cpkt) + strlen(port->name) + 1;
-            buffer = qemu_malloc(buffer_len);
+            buffer = g_malloc(buffer_len);
 
             memcpy(buffer, &cpkt, sizeof(cpkt));
             memcpy(buffer + sizeof(cpkt), port->name, strlen(port->name));
             buffer[buffer_len - 1] = 0;
 
             send_control_msg(port, buffer, buffer_len);
-            qemu_free(buffer);
+            g_free(buffer);
         }
 
         if (port->host_connected) {
@@ -447,9 +447,9 @@ static void control_out(VirtIODevice *vdev, VirtQueue *vq)
          * if the size of the buf differs
          */
         if (cur_len > len) {
-            qemu_free(buf);
+            g_free(buf);
 
-            buf = qemu_malloc(cur_len);
+            buf = g_malloc(cur_len);
             len = cur_len;
         }
         copied = iov_to_buf(elem.out_sg, elem.out_num, buf, 0, len);
@@ -457,7 +457,7 @@ static void control_out(VirtIODevice *vdev, VirtQueue *vq)
         handle_control_message(vser, buf, copied);
         virtqueue_push(vq, &elem, 0);
     }
-    qemu_free(buf);
+    g_free(buf);
     virtio_notify(vdev, vq);
 }
 
@@ -668,20 +668,22 @@ static struct BusInfo virtser_bus_info = {
     .name      = "virtio-serial-bus",
     .size      = sizeof(VirtIOSerialBus),
     .print_dev = virtser_bus_dev_print,
+    .props      = (Property[]) {
+        DEFINE_PROP_UINT32("nr", VirtIOSerialPort, id, VIRTIO_CONSOLE_BAD_ID),
+        DEFINE_PROP_STRING("name", VirtIOSerialPort, name),
+        DEFINE_PROP_END_OF_LIST()
+    }
 };
 
 static void virtser_bus_dev_print(Monitor *mon, DeviceState *qdev, int indent)
 {
     VirtIOSerialPort *port = DO_UPCAST(VirtIOSerialPort, dev, qdev);
 
-    monitor_printf(mon, "%*s dev-prop-int: id: %u\n",
-                   indent, "", port->id);
-    monitor_printf(mon, "%*s dev-prop-int: guest_connected: %d\n",
-                   indent, "", port->guest_connected);
-    monitor_printf(mon, "%*s dev-prop-int: host_connected: %d\n",
-                   indent, "", port->host_connected);
-    monitor_printf(mon, "%*s dev-prop-int: throttled: %d\n",
-                   indent, "", port->throttled);
+    monitor_printf(mon, "%*sport %d, guest %s, host %s, throttle %s\n",
+                   indent, "", port->id,
+                   port->guest_connected ? "on" : "off",
+                   port->host_connected ? "on" : "off",
+                   port->throttled ? "on" : "off");
 }
 
 /* This function is only used if a port id is not provided by the user */
@@ -860,8 +862,8 @@ VirtIODevice *virtio_serial_init(DeviceState *dev, virtio_serial_conf *conf)
     QTAILQ_INIT(&vser->ports);
 
     vser->bus.max_nr_ports = conf->max_virtserial_ports;
-    vser->ivqs = qemu_malloc(conf->max_virtserial_ports * sizeof(VirtQueue *));
-    vser->ovqs = qemu_malloc(conf->max_virtserial_ports * sizeof(VirtQueue *));
+    vser->ivqs = g_malloc(conf->max_virtserial_ports * sizeof(VirtQueue *));
+    vser->ovqs = g_malloc(conf->max_virtserial_ports * sizeof(VirtQueue *));
 
     /* Add a queue for host to guest transfers for port 0 (backward compat) */
     vser->ivqs[0] = virtio_add_queue(vdev, 128, handle_input);
@@ -887,7 +889,7 @@ VirtIODevice *virtio_serial_init(DeviceState *dev, virtio_serial_conf *conf)
     }
 
     vser->config.max_nr_ports = tswap32(conf->max_virtserial_ports);
-    vser->ports_map = qemu_mallocz(((conf->max_virtserial_ports + 31) / 32)
+    vser->ports_map = g_malloc0(((conf->max_virtserial_ports + 31) / 32)
         * sizeof(vser->ports_map[0]));
     /*
      * Reserve location 0 for a console port for backward compat
@@ -917,9 +919,9 @@ void virtio_serial_exit(VirtIODevice *vdev)
 
     unregister_savevm(vser->qdev, "virtio-console", vser);
 
-    qemu_free(vser->ivqs);
-    qemu_free(vser->ovqs);
-    qemu_free(vser->ports_map);
+    g_free(vser->ivqs);
+    g_free(vser->ovqs);
+    g_free(vser->ports_map);
 
     virtio_cleanup(vdev);
 }

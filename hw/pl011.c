@@ -4,7 +4,7 @@
  * Copyright (c) 2006 CodeSourcery.
  * Written by Paul Brook
  *
- * This code is licenced under the GPL.
+ * This code is licensed under the GPL.
  */
 
 #include "sysbus.h"
@@ -133,7 +133,7 @@ static void pl011_write(void *opaque, target_phys_addr_t offset,
         /* ??? Check if transmitter is enabled.  */
         ch = value;
         if (s->chr)
-            qemu_chr_write(s->chr, &ch, 1);
+            qemu_chr_fe_write(s->chr, &ch, 1);
         s->int_level |= PL011_INT_TX;
         pl011_update(s);
         break;

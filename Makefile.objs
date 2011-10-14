@@ -11,10 +11,21 @@ oslib-obj-$(CONFIG_WIN32) += oslib-win32.o qemu-thread-win32.o
 oslib-obj-$(CONFIG_POSIX) += oslib-posix.o qemu-thread-posix.o
 
 #######################################################################
+# coroutines
+coroutine-obj-y = qemu-coroutine.o qemu-coroutine-lock.o
+ifeq ($(CONFIG_UCONTEXT_COROUTINE),y)
+coroutine-obj-$(CONFIG_POSIX) += coroutine-ucontext.o
+else
+coroutine-obj-$(CONFIG_POSIX) += coroutine-gthread.o
+endif
+coroutine-obj-$(CONFIG_WIN32) += coroutine-win32.o
+
+#######################################################################
 # block-obj-y is code used by both qemu system emulation and qemu-img
 
-block-obj-y = cutils.o cache-utils.o qemu-malloc.o qemu-option.o module.o async.o
+block-obj-y = cutils.o cache-utils.o qemu-option.o module.o async.o
 block-obj-y += nbd.o block.o aio.o aes.o qemu-config.o qemu-progress.o qemu-sockets.o
+block-obj-y += $(coroutine-obj-y)
 block-obj-$(CONFIG_POSIX) += posix-aio-compat.o
 block-obj-$(CONFIG_LINUX_AIO) += linux-aio.o
 
@@ -89,6 +100,7 @@ common-obj-y += i2c.o smbus.o smbus_eeprom.o
 common-obj-y += eeprom93xx.o
 common-obj-y += scsi-disk.o cdrom.o
 common-obj-y += scsi-generic.o scsi-bus.o
+common-obj-y += hid.o
 common-obj-y += usb.o usb-hub.o usb-$(HOST_USB).o usb-hid.o usb-msd.o usb-wacom.o
 common-obj-y += usb-serial.o usb-net.o usb-bus.o usb-desc.o
 common-obj-$(CONFIG_SSI) += ssi.o
@@ -151,7 +163,7 @@ common-obj-y += qemu-timer.o qemu-timer-common.o
 
 slirp-obj-y = cksum.o if.o ip_icmp.o ip_input.o ip_output.o
 slirp-obj-y += slirp.o mbuf.o misc.o sbuf.o socket.o tcp_input.o tcp_output.o
-slirp-obj-y += tcp_subr.o tcp_timer.o udp.o bootp.o tftp.o
+slirp-obj-y += tcp_subr.o tcp_timer.o udp.o bootp.o tftp.o arp_table.o
 common-obj-$(CONFIG_SLIRP) += $(addprefix slirp/, $(slirp-obj-y))
 
 # xen backend driver support
@@ -165,6 +177,7 @@ user-obj-y =
 user-obj-y += envlist.o path.o
 user-obj-y += tcg-runtime.o host-utils.o
 user-obj-y += cutils.o cache-utils.o
+user-obj-y += $(trace-obj-y)
 
 ######################################################################
 # libhw
@@ -172,6 +185,7 @@ user-obj-y += cutils.o cache-utils.o
 hw-obj-y =
 hw-obj-y += vl.o loader.o
 hw-obj-$(CONFIG_VIRTIO) += virtio-console.o
+hw-obj-y += usb-libhw.o
 hw-obj-$(CONFIG_VIRTIO_PCI) += virtio-pci.o
 hw-obj-y += fw_cfg.o
 hw-obj-$(CONFIG_PCI) += pci.o pci_bridge.o
@@ -205,9 +219,9 @@ hw-obj-$(CONFIG_HPET) += hpet.o
 hw-obj-$(CONFIG_APPLESMC) += applesmc.o
 hw-obj-$(CONFIG_SMARTCARD) += usb-ccid.o ccid-card-passthru.o
 hw-obj-$(CONFIG_SMARTCARD_NSS) += ccid-card-emulated.o
+hw-obj-$(CONFIG_USB_REDIR) += usb-redir.o
 
 # PPC devices
-hw-obj-$(CONFIG_OPENPIC) += openpic.o
 hw-obj-$(CONFIG_PREP_PCI) += prep_pci.o
 # Mac shared devices
 hw-obj-$(CONFIG_MACIO) += macio.o
@@ -226,6 +240,7 @@ hw-obj-$(CONFIG_PPCE500_PCI) += ppce500_pci.o
 
 # MIPS devices
 hw-obj-$(CONFIG_PIIX4) += piix4.o
+hw-obj-$(CONFIG_G364FB) += g364fb.o
 
 # PCI watchdog devices
 hw-obj-$(CONFIG_PCI) += wdt_i6300esb.o
@@ -288,11 +303,14 @@ sound-obj-$(CONFIG_HDA) += intel-hda.o hda-audio.o
 adlib.o fmopl.o: QEMU_CFLAGS += -DBUILD_Y8950=0
 hw-obj-$(CONFIG_SOUND) += $(sound-obj-y)
 
-9pfs-nested-$(CONFIG_VIRTFS) = virtio-9p.o virtio-9p-debug.o
-9pfs-nested-$(CONFIG_VIRTFS) +=  virtio-9p-local.o virtio-9p-xattr.o
-9pfs-nested-$(CONFIG_VIRTFS) +=   virtio-9p-xattr-user.o virtio-9p-posix-acl.o
+9pfs-nested-$(CONFIG_VIRTFS)  = virtio-9p.o virtio-9p-debug.o
+9pfs-nested-$(CONFIG_VIRTFS) += virtio-9p-local.o virtio-9p-xattr.o
+9pfs-nested-$(CONFIG_VIRTFS) += virtio-9p-xattr-user.o virtio-9p-posix-acl.o
+9pfs-nested-$(CONFIG_VIRTFS) += virtio-9p-coth.o cofs.o codir.o cofile.o
+9pfs-nested-$(CONFIG_VIRTFS) += coxattr.o virtio-9p-handle.o
 
 hw-obj-$(CONFIG_REALLY_VIRTFS) += $(addprefix 9pfs/, $(9pfs-nested-y))
+$(addprefix 9pfs/, $(9pfs-nested-y)): QEMU_CFLAGS+=$(GLIB_CFLAGS)
 
 
 ######################################################################
@@ -322,12 +340,12 @@ trace.h: trace.h-timestamp trace-dtrace.h
 else
 trace.h: trace.h-timestamp
 endif
-trace.h-timestamp: $(SRC_PATH)/trace-events config-host.mak
+trace.h-timestamp: $(SRC_PATH)/trace-events $(BUILD_DIR)/config-host.mak
 	$(call quiet-command,sh $(SRC_PATH)/scripts/tracetool --$(TRACE_BACKEND) -h < $< > $@,"  GEN   trace.h")
 	@cmp -s $@ trace.h || cp $@ trace.h
 
 trace.c: trace.c-timestamp
-trace.c-timestamp: $(SRC_PATH)/trace-events config-host.mak
+trace.c-timestamp: $(SRC_PATH)/trace-events $(BUILD_DIR)/config-host.mak
 	$(call quiet-command,sh $(SRC_PATH)/scripts/tracetool --$(TRACE_BACKEND) -c < $< > $@,"  GEN   trace.c")
 	@cmp -s $@ trace.c || cp $@ trace.c
 
@@ -340,7 +358,7 @@ trace-dtrace.h: trace-dtrace.dtrace
 # but that gets picked up by QEMU's Makefile as an external dependency
 # rule file. So we use '.dtrace' instead
 trace-dtrace.dtrace: trace-dtrace.dtrace-timestamp
-trace-dtrace.dtrace-timestamp: $(SRC_PATH)/trace-events config-host.mak
+trace-dtrace.dtrace-timestamp: $(SRC_PATH)/trace-events $(BUILD_DIR)/config-host.mak
 	$(call quiet-command,sh $(SRC_PATH)/scripts/tracetool --$(TRACE_BACKEND) -d < $< > $@,"  GEN   trace-dtrace.dtrace")
 	@cmp -s $@ trace-dtrace.dtrace || cp $@ trace-dtrace.dtrace
 
@@ -352,27 +370,56 @@ trace-dtrace.lo: trace-dtrace.dtrace
 	@echo "missing libtool. please install and rerun configure."; exit 1
 else
 trace-dtrace.lo: trace-dtrace.dtrace
-	$(call quiet-command,libtool --mode=compile --tag=CC dtrace -o $@ -G -s $<, "  lt GEN trace-dtrace.o")
+	$(call quiet-command,$(LIBTOOL) --mode=compile --tag=CC dtrace -o $@ -G -s $<, "  lt GEN trace-dtrace.o")
 endif
 
-simpletrace.o: simpletrace.c $(GENERATED_HEADERS)
+trace/simple.o: trace/simple.c $(GENERATED_HEADERS)
 
-ifeq ($(TRACE_BACKEND),dtrace)
-trace-obj-y = trace-dtrace.o
-else
+trace-obj-$(CONFIG_TRACE_DTRACE) += trace-dtrace.o
+ifneq ($(TRACE_BACKEND),dtrace)
 trace-obj-y = trace.o
-ifeq ($(TRACE_BACKEND),simple)
-trace-obj-y += simpletrace.o
-user-obj-y += qemu-timer-common.o
 endif
-endif
+
+trace-nested-$(CONFIG_TRACE_DEFAULT) += default.o
+
+trace-nested-$(CONFIG_TRACE_SIMPLE) += simple.o
+trace-obj-$(CONFIG_TRACE_SIMPLE) += qemu-timer-common.o
+
+trace-nested-$(CONFIG_TRACE_STDERR) += stderr.o
+
+trace-nested-y += control.o
+
+trace-obj-y += $(addprefix trace/, $(trace-nested-y))
+
+$(trace-obj-y): $(GENERATED_HEADERS)
 
 ######################################################################
 # smartcard
 
 libcacard-y = cac.o event.o vcard.o vreader.o vcard_emul_nss.o vcard_emul_type.o card_7816.o
 
+######################################################################
+# qapi
+
+qapi-nested-y = qapi-visit-core.o qmp-input-visitor.o qmp-output-visitor.o qapi-dealloc-visitor.o
+qapi-nested-y += qmp-registry.o qmp-dispatch.o
+qapi-obj-y = $(addprefix qapi/, $(qapi-nested-y))
+
+common-obj-y += qmp-marshal.o qapi-visit.o qapi-types.o $(qapi-obj-y)
+common-obj-y += qmp.o hmp.o
+
+######################################################################
+# guest agent
+
+qga-nested-y = guest-agent-commands.o guest-agent-command-state.o
+qga-obj-y = $(addprefix qga/, $(qga-nested-y))
+qga-obj-y += qemu-ga.o qemu-tool.o qemu-error.o qemu-sockets.o module.o qemu-option.o cutils.o osdep.o
+qga-obj-$(CONFIG_WIN32) += oslib-win32.o
+qga-obj-$(CONFIG_POSIX) += oslib-posix.o
+
 vl.o: QEMU_CFLAGS+=$(GPROF_CFLAGS)
 
 vl.o: QEMU_CFLAGS+=$(SDL_CFLAGS)
+
+QEMU_CFLAGS+=$(GLIB_CFLAGS)
 

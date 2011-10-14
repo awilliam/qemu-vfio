@@ -4,7 +4,7 @@
  *
  * Copyright (c) 2008 Jan Kiszka
  *
- * This code is licenced under the GNU GPL v2.
+ * This code is licensed under the GNU GPL v2.
  */
 #include "hw.h"
 #include "bitbang_i2c.h"
@@ -171,7 +171,7 @@ bitbang_i2c_interface *bitbang_i2c_init(i2c_bus *bus)
 {
     bitbang_i2c_interface *s;
 
-    s = qemu_mallocz(sizeof(bitbang_i2c_interface));
+    s = g_malloc0(sizeof(bitbang_i2c_interface));
 
     s->bus = bus;
     s->last_data = 1;

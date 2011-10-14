@@ -27,7 +27,7 @@ static ssize_t flush_buf(VirtIOSerialPort *port, const uint8_t *buf, size_t len)
     VirtConsole *vcon = DO_UPCAST(VirtConsole, port, port);
     ssize_t ret;
 
-    ret = qemu_chr_write(vcon->chr, buf, len);
+    ret = qemu_chr_fe_write(vcon->chr, buf, len);
     trace_virtio_console_flush_buf(port->id, len, ret);
 
     if (ret < 0) {
@@ -52,7 +52,7 @@ static void guest_open(VirtIOSerialPort *port)
 {
     VirtConsole *vcon = DO_UPCAST(VirtConsole, port, port);
 
-    qemu_chr_guest_open(vcon->chr);
+    qemu_chr_fe_open(vcon->chr);
 }
 
 /* Callback function that's called when the guest closes the port */
@@ -60,7 +60,7 @@ static void guest_close(VirtIOSerialPort *port)
 {
     VirtConsole *vcon = DO_UPCAST(VirtConsole, port, port);
 
-    qemu_chr_guest_close(vcon->chr);
+    qemu_chr_fe_close(vcon->chr);
 }
 
 /* Readiness of the guest to accept data on a port */
@@ -139,9 +139,7 @@ static VirtIOSerialPortInfo virtconsole_info = {
     .init          = virtconsole_initfn,
     .exit          = virtconsole_exitfn,
     .qdev.props = (Property[]) {
-        DEFINE_PROP_UINT32("nr", VirtConsole, port.id, VIRTIO_CONSOLE_BAD_ID),
         DEFINE_PROP_CHR("chardev", VirtConsole, chr),
-        DEFINE_PROP_STRING("name", VirtConsole, port.name),
         DEFINE_PROP_END_OF_LIST(),
     },
 };
@@ -158,9 +156,7 @@ static VirtIOSerialPortInfo virtserialport_info = {
     .init          = virtconsole_initfn,
     .exit          = virtconsole_exitfn,
     .qdev.props = (Property[]) {
-        DEFINE_PROP_UINT32("nr", VirtConsole, port.id, VIRTIO_CONSOLE_BAD_ID),
         DEFINE_PROP_CHR("chardev", VirtConsole, chr),
-        DEFINE_PROP_STRING("name", VirtConsole, port.name),
         DEFINE_PROP_END_OF_LIST(),
     },
 };

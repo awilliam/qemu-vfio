@@ -1,7 +1,12 @@
-#include "exec.h"
+#include "cpu.h"
+#include "dyngen-exec.h"
 #include "host-utils.h"
 #include "helper.h"
 #include "sysemu.h"
+
+#if !defined(CONFIG_USER_ONLY)
+#include "softmmu_exec.h"
+#endif
 
 //#define DEBUG_MMU
 //#define DEBUG_MXCC
@@ -3896,10 +3901,8 @@ target_ulong cpu_get_ccr(CPUState *env1)
 
 static void put_ccr(target_ulong val)
 {
-    target_ulong tmp = val;
-
-    env->xcc = (tmp >> 4) << 20;
-    env->psr = (tmp & 0xf) << 20;
+    env->xcc = (val >> 4) << 20;
+    env->psr = (val & 0xf) << 20;
     CC_OP = CC_OP_FLAGS;
 }
 
@@ -4222,17 +4225,16 @@ static void do_unaligned_access(target_ulong addr, int is_write, int is_user,
    NULL, it means that the function was called in C code (i.e. not
    from generated code or from helper.c) */
 /* XXX: fix it to restore all registers */
-void tlb_fill(target_ulong addr, int is_write, int mmu_idx, void *retaddr)
+void tlb_fill(CPUState *env1, target_ulong addr, int is_write, int mmu_idx,
+              void *retaddr)
 {
     int ret;
     CPUState *saved_env;
 
-    /* XXX: hack to restore env in all cases, even if not called from
-       generated code */
     saved_env = env;
-    env = cpu_single_env;
+    env = env1;
 
-    ret = cpu_sparc_handle_mmu_fault(env, addr, is_write, mmu_idx, 1);
+    ret = cpu_sparc_handle_mmu_fault(env, addr, is_write, mmu_idx);
     if (ret) {
         cpu_restore_state2(retaddr);
         cpu_loop_exit(env);
@@ -4247,13 +4249,8 @@ void tlb_fill(target_ulong addr, int is_write, int mmu_idx, void *retaddr)
 static void do_unassigned_access(target_phys_addr_t addr, int is_write,
                                  int is_exec, int is_asi, int size)
 {
-    CPUState *saved_env;
     int fault_type;
 
-    /* XXX: hack to restore env in all cases, even if not called from
-       generated code */
-    saved_env = env;
-    env = cpu_single_env;
 #ifdef DEBUG_UNASSIGNED
     if (is_asi)
         printf("Unassigned mem %s access of %d byte%s to " TARGET_FMT_plx
@@ -4301,8 +4298,6 @@ static void do_unassigned_access(target_phys_addr_t addr, int is_write,
     if (env->mmuregs[0] & MMU_NF) {
         tlb_flush(env, 1);
     }
-
-    env = saved_env;
 }
 #endif
 #else
@@ -4314,13 +4309,6 @@ static void do_unassigned_access(target_phys_addr_t addr, int is_write,
                                  int is_exec, int is_asi, int size)
 #endif
 {
-    CPUState *saved_env;
-
-    /* XXX: hack to restore env in all cases, even if not called from
-       generated code */
-    saved_env = env;
-    env = cpu_single_env;
-
 #ifdef DEBUG_UNASSIGNED
     printf("Unassigned mem access to " TARGET_FMT_plx " from " TARGET_FMT_lx
            "\n", addr, env->pc);
@@ -4330,8 +4318,6 @@ static void do_unassigned_access(target_phys_addr_t addr, int is_write,
         raise_exception(TT_CODE_ACCESS);
     else
         raise_exception(TT_DATA_ACCESS);
-
-    env = saved_env;
 }
 #endif
 
@@ -4365,7 +4351,14 @@ void helper_tick_set_limit(void *opaque, uint64_t limit)
 void cpu_unassigned_access(CPUState *env1, target_phys_addr_t addr,
                            int is_write, int is_exec, int is_asi, int size)
 {
+    CPUState *saved_env;
+
+    saved_env = env;
     env = env1;
-    do_unassigned_access(addr, is_write, is_exec, is_asi, size);
+    /* Ignore unassigned accesses outside of CPU context */
+    if (env1) {
+        do_unassigned_access(addr, is_write, is_exec, is_asi, size);
+    }
+    env = saved_env;
 }
 #endif

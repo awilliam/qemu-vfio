@@ -27,11 +27,7 @@ ifdef CONFIG_USER_ONLY
 QEMU_PROG=qemu-$(TARGET_ARCH2)
 else
 # system emulator name
-ifeq ($(TARGET_ARCH), i386)
-QEMU_PROG=qemu$(EXESUF)
-else
 QEMU_PROG=qemu-system-$(TARGET_ARCH2)$(EXESUF)
-endif
 endif
 
 PROGS=$(QEMU_PROG)
@@ -44,7 +40,7 @@ endif
 config-target.h: config-target.h-timestamp
 config-target.h-timestamp: config-target.mak
 
-ifdef CONFIG_SYSTEMTAP_TRACE
+ifdef CONFIG_TRACE_SYSTEMTAP
 stap: $(QEMU_PROG).stp
 
 ifdef CONFIG_USER_ONLY
@@ -72,7 +68,7 @@ all: $(PROGS) stap
 #########################################################
 # cpu emulator library
 libobj-y = exec.o translate-all.o cpu-exec.o translate.o
-libobj-y += tcg/tcg.o
+libobj-y += tcg/tcg.o tcg/optimize.o
 libobj-y += fpu/softfloat.o
 libobj-y += op_helper.o helper.o
 ifeq ($(TARGET_BASE_ARCH), i386)
@@ -111,7 +107,7 @@ $(call set-vpath, $(SRC_PATH)/linux-user:$(SRC_PATH)/linux-user/$(TARGET_ABI_DIR
 QEMU_CFLAGS+=-I$(SRC_PATH)/linux-user/$(TARGET_ABI_DIR) -I$(SRC_PATH)/linux-user
 obj-y = main.o syscall.o strace.o mmap.o signal.o thunk.o \
       elfload.o linuxload.o uaccess.o gdbstub.o cpu-uname.o \
-      qemu-malloc.o user-exec.o $(oslib-obj-y)
+      user-exec.o $(oslib-obj-y)
 
 obj-$(TARGET_HAS_BFLT) += flatload.o
 
@@ -195,15 +191,16 @@ obj-$(CONFIG_VIRTIO) += virtio.o virtio-blk.o virtio-balloon.o virtio-net.o virt
 obj-y += vhost_net.o
 obj-$(CONFIG_VHOST_NET) += vhost.o
 obj-$(CONFIG_REALLY_VIRTFS) += 9pfs/virtio-9p-device.o
-obj-y += rwhandler.o
 obj-$(CONFIG_KVM) += kvm.o kvm-all.o
 obj-$(CONFIG_NO_KVM) += kvm-stub.o
+obj-y += memory.o
 LIBS+=-lz
 
 QEMU_CFLAGS += $(VNC_TLS_CFLAGS)
 QEMU_CFLAGS += $(VNC_SASL_CFLAGS)
 QEMU_CFLAGS += $(VNC_JPEG_CFLAGS)
 QEMU_CFLAGS += $(VNC_PNG_CFLAGS)
+QEMU_CFLAGS += $(GLIB_CFLAGS)
 
 # xen support
 obj-$(CONFIG_XEN) += xen-all.o xen_machine_pv.o xen_domainbuild.o xen-mapcache.o
@@ -235,7 +232,7 @@ obj-i386-$(CONFIG_KVM) += kvmclock.o
 obj-i386-$(CONFIG_SPICE) += qxl.o qxl-logger.o qxl-render.o
 
 # shared objects
-obj-ppc-y = ppc.o
+obj-ppc-y = ppc.o ppc_booke.o
 obj-ppc-y += vga.o
 # PREP target
 obj-ppc-y += i8259.o mc146818rtc.o
@@ -245,19 +242,19 @@ obj-ppc-y += ppc_oldworld.o
 # NewWorld PowerMac
 obj-ppc-y += ppc_newworld.o
 # IBM pSeries (sPAPR)
-ifeq ($(CONFIG_FDT)$(TARGET_PPC64),yy)
-obj-ppc-y += spapr.o spapr_hcall.o spapr_rtas.o spapr_vio.o
-obj-ppc-y += xics.o spapr_vty.o spapr_llan.o spapr_vscsi.o
-endif
+obj-ppc-$(CONFIG_PSERIES) += spapr.o spapr_hcall.o spapr_rtas.o spapr_vio.o
+obj-ppc-$(CONFIG_PSERIES) += xics.o spapr_vty.o spapr_llan.o spapr_vscsi.o
 # PowerPC 4xx boards
 obj-ppc-y += ppc4xx_devs.o ppc4xx_pci.o ppc405_uc.o ppc405_boards.o
 obj-ppc-y += ppc440.o ppc440_bamboo.o
 # PowerPC E500 boards
-obj-ppc-y += ppce500_mpc8544ds.o mpc8544_guts.o
+obj-ppc-y += ppce500_mpc8544ds.o mpc8544_guts.o ppce500_spin.o
 # PowerPC 440 Xilinx ML507 reference board.
 obj-ppc-y += virtex_ml507.o
 obj-ppc-$(CONFIG_KVM) += kvm_ppc.o
 obj-ppc-$(CONFIG_FDT) += device_tree.o
+# PowerPC OpenPIC
+obj-ppc-y += openpic.o
 
 # Xilinx PPC peripherals
 obj-ppc-y += xilinx_intc.o
@@ -290,7 +287,7 @@ obj-lm32-y += framebuffer.o
 obj-mips-y = mips_r4k.o mips_jazz.o mips_malta.o mips_mipssim.o
 obj-mips-y += mips_addr.o mips_timer.o mips_int.o
 obj-mips-y += vga.o i8259.o
-obj-mips-y += g364fb.o jazz_led.o
+obj-mips-y += jazz_led.o
 obj-mips-y += gt64xxx.o mc146818rtc.o
 obj-mips-y += cirrus_vga.o
 obj-mips-$(CONFIG_FULONG) += bonito.o vt82c686.o mips_fulong2e.o
@@ -311,7 +308,6 @@ obj-microblaze-$(CONFIG_FDT) += device_tree.o
 # Boards
 obj-cris-y = cris_pic_cpu.o
 obj-cris-y += cris-boot.o
-obj-cris-y += etraxfs.o axis_dev88.o
 obj-cris-y += axis_dev88.o
 
 # IO blocks
@@ -353,6 +349,7 @@ obj-arm-y += omap2.o omap_dss.o soc_dma.o omap_gptimer.o omap_synctimer.o \
 obj-arm-y += omap_sx1.o palm.o tsc210x.o
 obj-arm-y += nseries.o blizzard.o onenand.o vga.o cbus.o tusb6010.o usb-musb.o
 obj-arm-y += mst_fpga.o mainstone.o
+obj-arm-y += z2.o
 obj-arm-y += musicpal.o bitbang_i2c.o marvell_88w8618_audio.o
 obj-arm-y += framebuffer.o
 obj-arm-y += syborg.o syborg_fb.o syborg_interrupt.o syborg_keyboard.o
@@ -373,10 +370,16 @@ obj-s390x-y = s390-virtio-bus.o s390-virtio.o
 
 obj-alpha-y = i8259.o mc146818rtc.o
 obj-alpha-y += vga.o cirrus_vga.o
+obj-alpha-y += alpha_pci.o alpha_dp264.o alpha_typhoon.o
+
+obj-xtensa-y += xtensa_pic.o
+obj-xtensa-y += xtensa_sample.o
+obj-xtensa-y += xtensa_dc232b.o
+obj-xtensa-y += xtensa-semi.o
 
 main.o: QEMU_CFLAGS+=$(GPROF_CFLAGS)
 
-monitor.o: hmp-commands.h qmp-commands.h
+monitor.o: hmp-commands.h qmp-commands-old.h
 
 $(obj-y) $(obj-$(TARGET_BASE_ARCH)-y): $(GENERATED_HEADERS)
 
@@ -384,20 +387,22 @@ obj-y += $(addprefix ../, $(common-obj-y))
 obj-y += $(addprefix ../libdis/, $(libdis-y))
 obj-y += $(libobj-y)
 obj-y += $(addprefix $(HWDIR)/, $(hw-obj-y))
+obj-y += $(addprefix ../, $(trace-obj-y))
 
 endif # CONFIG_SOFTMMU
 
 ifndef CONFIG_LINUX_USER
+ifndef CONFIG_BSD_USER
 # libcacard needs qemu-thread support, and besides is only needed by devices
-# so not requires with linux-user targets
+# so not requires with linux-user / bsd-user targets
 obj-$(CONFIG_SMARTCARD_NSS) += $(addprefix ../libcacard/, $(libcacard-y))
+endif # CONFIG_BSD_USER
 endif # CONFIG_LINUX_USER
 
-obj-y += $(addprefix ../, $(trace-obj-y))
 obj-$(CONFIG_GDBSTUB_XML) += gdbstub-xml.o
 
 $(QEMU_PROG): $(obj-y) $(obj-$(TARGET_BASE_ARCH)-y)
-	$(call LINK,$(obj-y) $(obj-$(TARGET_BASE_ARCH)-y))
+	$(call LINK,$^)
 
 
 gdbstub-xml.c: $(TARGET_XML_FILES) $(SRC_PATH)/scripts/feature_to_c.sh
@@ -406,14 +411,14 @@ gdbstub-xml.c: $(TARGET_XML_FILES) $(SRC_PATH)/scripts/feature_to_c.sh
 hmp-commands.h: $(SRC_PATH)/hmp-commands.hx
 	$(call quiet-command,sh $(SRC_PATH)/scripts/hxtool -h < $< > $@,"  GEN   $(TARGET_DIR)$@")
 
-qmp-commands.h: $(SRC_PATH)/qmp-commands.hx
+qmp-commands-old.h: $(SRC_PATH)/qmp-commands.hx
 	$(call quiet-command,sh $(SRC_PATH)/scripts/hxtool -h < $< > $@,"  GEN   $(TARGET_DIR)$@")
 
 clean:
 	rm -f *.o *.a *~ $(PROGS) nwfpe/*.o fpu/*.o
 	rm -f *.d */*.d tcg/*.o ide/*.o 9pfs/*.o
-	rm -f hmp-commands.h qmp-commands.h gdbstub-xml.c
-ifdef CONFIG_SYSTEMTAP_TRACE
+	rm -f hmp-commands.h qmp-commands-old.h gdbstub-xml.c
+ifdef CONFIG_TRACE_SYSTEMTAP
 	rm -f *.stp
 endif
 
@@ -424,7 +429,7 @@ ifneq ($(STRIP),)
 	$(STRIP) $(patsubst %,"$(DESTDIR)$(bindir)/%",$(PROGS))
 endif
 endif
-ifdef CONFIG_SYSTEMTAP_TRACE
+ifdef CONFIG_TRACE_SYSTEMTAP
 	$(INSTALL_DIR) "$(DESTDIR)$(datadir)/../systemtap/tapset"
 	$(INSTALL_DATA) $(QEMU_PROG).stp "$(DESTDIR)$(datadir)/../systemtap/tapset"
 endif

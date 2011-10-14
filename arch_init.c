@@ -78,6 +78,8 @@ const char arch_config_name[] = CONFIG_QEMU_CONFDIR "/target-" TARGET_ARCH ".con
 #define QEMU_ARCH QEMU_ARCH_SH4
 #elif defined(TARGET_SPARC)
 #define QEMU_ARCH QEMU_ARCH_SPARC
+#elif defined(TARGET_XTENSA)
+#define QEMU_ARCH QEMU_ARCH_XTENSA
 #endif
 
 const uint32_t arch_type = QEMU_ARCH;
@@ -235,7 +237,7 @@ static void sort_ram_list(void)
     QLIST_FOREACH(block, &ram_list.blocks, next) {
         ++n;
     }
-    blocks = qemu_malloc(n * sizeof *blocks);
+    blocks = g_malloc(n * sizeof *blocks);
     n = 0;
     QLIST_FOREACH_SAFE(block, &ram_list.blocks, next, nblock) {
         blocks[n++] = block;
@@ -245,7 +247,7 @@ static void sort_ram_list(void)
     while (--n >= 0) {
         QLIST_INSERT_HEAD(&ram_list.blocks, blocks[n], next);
     }
-    qemu_free(blocks);
+    g_free(blocks);
 }
 
 int ram_save_live(Monitor *mon, QEMUFile *f, int stage, void *opaque)
@@ -455,11 +457,6 @@ int ram_load(QEMUFile *f, void *opaque, int version_id)
     } while (!(flags & RAM_SAVE_FLAG_EOS));
 
     return 0;
-}
-
-void qemu_service_io(void)
-{
-    qemu_notify_event();
 }
 
 #ifdef HAS_AUDIO

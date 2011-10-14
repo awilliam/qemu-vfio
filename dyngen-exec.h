@@ -19,15 +19,6 @@
 #if !defined(__DYNGEN_EXEC_H__)
 #define __DYNGEN_EXEC_H__
 
-#include "qemu-common.h"
-
-#ifdef __OpenBSD__
-#include <sys/types.h>
-#endif
-
-/* XXX: This may be wrong for 64-bit ILP32 hosts.  */
-typedef void * host_reg_t;
-
 #if defined(__i386__)
 #define AREG0 "ebp"
 #elif defined(__x86_64__)
@@ -64,21 +55,6 @@ typedef void * host_reg_t;
 #error unsupported CPU
 #endif
 
-#define xglue(x, y) x ## y
-#define glue(x, y) xglue(x, y)
-#define stringify(s)	tostring(s)
-#define tostring(s)	#s
-
-/* The return address may point to the start of the next instruction.
-   Subtracting one gets us the call instruction itself.  */
-#if defined(__s390__) && !defined(__s390x__)
-# define GETPC() ((void*)(((unsigned long)__builtin_return_address(0) & 0x7fffffffUL) - 1))
-#elif defined(__arm__)
-/* Thumb return addresses have the low bit set, so we need to subtract two.
-   This is still safe in ARM mode because instructions are 4 bytes.  */
-# define GETPC() ((void *)((unsigned long)__builtin_return_address(0) - 2))
-#else
-# define GETPC() ((void *)((unsigned long)__builtin_return_address(0) - 1))
-#endif
+register CPUState *env asm(AREG0);
 
 #endif /* !defined(__DYNGEN_EXEC_H__) */

@@ -73,7 +73,7 @@ static void lba_to_msf(uint8_t *buf, int lba)
 
 static inline int media_present(IDEState *s)
 {
-    return (s->nb_sectors > 0);
+    return !s->tray_open && s->nb_sectors > 0;
 }
 
 /* XXX: DVDs that could fit on a CD will be reported as a CD */
@@ -104,17 +104,20 @@ static void cd_data_to_raw(uint8_t *buf, int lba)
     memset(buf, 0, 288);
 }
 
-static int cd_read_sector(BlockDriverState *bs, int lba, uint8_t *buf,
-                           int sector_size)
+static int cd_read_sector(IDEState *s, int lba, uint8_t *buf, int sector_size)
 {
     int ret;
 
     switch(sector_size) {
     case 2048:
-        ret = bdrv_read(bs, (int64_t)lba << 2, buf, 4);
+        bdrv_acct_start(s->bs, &s->acct, 4 * BDRV_SECTOR_SIZE, BDRV_ACCT_READ);
+        ret = bdrv_read(s->bs, (int64_t)lba << 2, buf, 4);
+        bdrv_acct_done(s->bs, &s->acct);
         break;
     case 2352:
-        ret = bdrv_read(bs, (int64_t)lba << 2, buf + 16, 4);
+        bdrv_acct_start(s->bs, &s->acct, 4 * BDRV_SECTOR_SIZE, BDRV_ACCT_READ);
+        ret = bdrv_read(s->bs, (int64_t)lba << 2, buf + 16, 4);
+        bdrv_acct_done(s->bs, &s->acct);
         if (ret < 0)
             return ret;
         cd_data_to_raw(buf, lba);
@@ -181,7 +184,7 @@ void ide_atapi_cmd_reply_end(IDEState *s)
     } else {
         /* see if a new sector must be read */
         if (s->lba != -1 && s->io_buffer_index >= s->cd_sector_size) {
-            ret = cd_read_sector(s->bs, s->lba, s->io_buffer, s->cd_sector_size);
+            ret = cd_read_sector(s, s->lba, s->io_buffer, s->cd_sector_size);
             if (ret < 0) {
                 ide_transfer_stop(s);
                 ide_atapi_io_error(s, ret);
@@ -250,6 +253,7 @@ static void ide_atapi_cmd_reply(IDEState *s, int size, int max_size)
     s->io_buffer_index = 0;
 
     if (s->atapi_dma) {
+        bdrv_acct_start(s->bs, &s->acct, size, BDRV_ACCT_READ);
         s->status = READY_STAT | SEEK_STAT | DRQ_STAT;
         s->bus->dma->ops->start_dma(s->bus->dma, s,
                                    ide_atapi_cmd_read_dma_cb);
@@ -322,10 +326,7 @@ static void ide_atapi_cmd_read_dma_cb(void *opaque, int ret)
         s->status = READY_STAT | SEEK_STAT;
         s->nsector = (s->nsector & ~7) | ATAPI_INT_REASON_IO | ATAPI_INT_REASON_CD;
         ide_set_irq(s->bus);
-    eot:
-        s->bus->dma->ops->add_status(s->bus->dma, BM_STATUS_INT);
-        ide_set_inactive(s);
-        return;
+        goto eot;
     }
 
     s->io_buffer_index = 0;
@@ -343,9 +344,11 @@ static void ide_atapi_cmd_read_dma_cb(void *opaque, int ret)
 #ifdef DEBUG_AIO
     printf("aio_read_cd: lba=%u n=%d\n", s->lba, n);
 #endif
+
     s->bus->dma->iov.iov_base = (void *)(s->io_buffer + data_offset);
     s->bus->dma->iov.iov_len = n * 4 * 512;
     qemu_iovec_init_external(&s->bus->dma->qiov, &s->bus->dma->iov, 1);
+
     s->bus->dma->aiocb = bdrv_aio_readv(s->bs, (int64_t)s->lba << 2,
                                        &s->bus->dma->qiov, n * 4,
                                        ide_atapi_cmd_read_dma_cb, s);
@@ -355,6 +358,12 @@ static void ide_atapi_cmd_read_dma_cb(void *opaque, int ret)
                             ASC_MEDIUM_NOT_PRESENT);
         goto eot;
     }
+
+    return;
+eot:
+    bdrv_acct_done(s->bs, &s->acct);
+    s->bus->dma->ops->add_status(s->bus->dma, BM_STATUS_INT);
+    ide_set_inactive(s);
 }
 
 /* start a CD-CDROM read command with DMA */
@@ -367,6 +376,8 @@ static void ide_atapi_cmd_read_dma(IDEState *s, int lba, int nb_sectors,
     s->io_buffer_index = 0;
     s->io_buffer_size = 0;
     s->cd_sector_size = sector_size;
+
+    bdrv_acct_start(s->bs, &s->acct, s->packet_transfer_size, BDRV_ACCT_READ);
 
     /* XXX: check if BUSY_STAT should be set */
     s->status = READY_STAT | SEEK_STAT | DRQ_STAT | BUSY_STAT;
@@ -510,7 +521,7 @@ static unsigned int event_status_media(IDEState *s,
     uint8_t event_code, media_status;
 
     media_status = 0;
-    if (s->bs->tray_open) {
+    if (s->tray_open) {
         media_status = MS_TRAY_OPEN;
     } else if (bdrv_is_inserted(s->bs)) {
         media_status = MS_MEDIA_PRESENT;
@@ -546,13 +557,13 @@ static void cmd_get_event_status_notification(IDEState *s,
         uint8_t reserved3[2];
         uint16_t len;
         uint8_t control;
-    } __attribute__((packed)) *gesn_cdb;
+    } QEMU_PACKED *gesn_cdb;
 
     struct {
         uint16_t len;
         uint8_t notification_class;
         uint8_t supported_events;
-    } __attribute((packed)) *gesn_event_header;
+    } QEMU_PACKED *gesn_event_header;
 
     enum notification_class_request_type {
         NCR_RESERVED1 = 1 << 0,
@@ -777,8 +788,9 @@ static void cmd_mode_sense(IDEState *s, uint8_t *buf)
             buf[12] = 0x71;
             buf[13] = 3 << 5;
             buf[14] = (1 << 0) | (1 << 3) | (1 << 5);
-            if (bdrv_is_locked(s->bs))
+            if (s->tray_locked) {
                 buf[6] |= 1 << 1;
+            }
             buf[15] = 0x00;
             cpu_to_ube16(&buf[16], 706);
             buf[18] = 0;
@@ -820,7 +832,8 @@ static void cmd_test_unit_ready(IDEState *s, uint8_t *buf)
 
 static void cmd_prevent_allow_medium_removal(IDEState *s, uint8_t* buf)
 {
-    bdrv_set_locked(s->bs, buf[4] & 1);
+    s->tray_locked = buf[4] & 1;
+    bdrv_lock_medium(s->bs, buf[4] & 1);
     ide_atapi_cmd_ok(s);
 }
 
@@ -892,29 +905,22 @@ static void cmd_seek(IDEState *s, uint8_t* buf)
 
 static void cmd_start_stop_unit(IDEState *s, uint8_t* buf)
 {
-    int start, eject, sense, err = 0;
-    start = buf[4] & 1;
-    eject = (buf[4] >> 1) & 1;
+    int sense;
+    bool start = buf[4] & 1;
+    bool loej = buf[4] & 2;     /* load on start, eject on !start */
 
-    if (eject) {
-        err = bdrv_eject(s->bs, !start);
-    }
-
-    switch (err) {
-    case 0:
-        ide_atapi_cmd_ok(s);
-        break;
-    case -EBUSY:
-        sense = SENSE_NOT_READY;
-        if (bdrv_is_inserted(s->bs)) {
-            sense = SENSE_ILLEGAL_REQUEST;
+    if (loej) {
+        if (!start && !s->tray_open && s->tray_locked) {
+            sense = bdrv_is_inserted(s->bs)
+                ? SENSE_NOT_READY : SENSE_ILLEGAL_REQUEST;
+            ide_atapi_cmd_error(s, sense, ASC_MEDIA_REMOVAL_PREVENTED);
+            return;
         }
-        ide_atapi_cmd_error(s, sense, ASC_MEDIA_REMOVAL_PREVENTED);
-        break;
-    default:
-        ide_atapi_cmd_error(s, SENSE_NOT_READY, ASC_MEDIUM_NOT_PRESENT);
-        break;
+        bdrv_eject(s->bs, !start);
+        s->tray_open = !start;
     }
+
+    ide_atapi_cmd_ok(s);
 }
 
 static void cmd_mechanism_status(IDEState *s, uint8_t* buf)
@@ -1062,20 +1068,21 @@ static const struct {
     [ 0x03 ] = { cmd_request_sense,                 ALLOW_UA },
     [ 0x12 ] = { cmd_inquiry,                       ALLOW_UA },
     [ 0x1a ] = { cmd_mode_sense, /* (6) */          0 },
-    [ 0x1b ] = { cmd_start_stop_unit,               0 },
+    [ 0x1b ] = { cmd_start_stop_unit,               0 }, /* [1] */
     [ 0x1e ] = { cmd_prevent_allow_medium_removal,  0 },
     [ 0x25 ] = { cmd_read_cdvd_capacity,            CHECK_READY },
-    [ 0x28 ] = { cmd_read, /* (10) */               0 },
+    [ 0x28 ] = { cmd_read, /* (10) */               CHECK_READY },
     [ 0x2b ] = { cmd_seek,                          CHECK_READY },
     [ 0x43 ] = { cmd_read_toc_pma_atip,             CHECK_READY },
     [ 0x46 ] = { cmd_get_configuration,             ALLOW_UA },
     [ 0x4a ] = { cmd_get_event_status_notification, ALLOW_UA },
     [ 0x5a ] = { cmd_mode_sense, /* (10) */         0 },
-    [ 0xa8 ] = { cmd_read, /* (12) */               0 },
-    [ 0xad ] = { cmd_read_dvd_structure,            0 },
+    [ 0xa8 ] = { cmd_read, /* (12) */               CHECK_READY },
+    [ 0xad ] = { cmd_read_dvd_structure,            CHECK_READY },
     [ 0xbb ] = { cmd_set_speed,                     0 },
     [ 0xbd ] = { cmd_mechanism_status,              0 },
-    [ 0xbe ] = { cmd_read_cd,                       0 },
+    [ 0xbe ] = { cmd_read_cd,                       CHECK_READY },
+    /* [1] handler detects and reports not ready condition itself */
 };
 
 void ide_atapi_cmd(IDEState *s)
@@ -1111,7 +1118,7 @@ void ide_atapi_cmd(IDEState *s)
      * GET_EVENT_STATUS_NOTIFICATION to detect such tray open/close
      * states rely on this behavior.
      */
-    if (bdrv_is_inserted(s->bs) && s->cdrom_changed) {
+    if (!s->tray_open && bdrv_is_inserted(s->bs) && s->cdrom_changed) {
         ide_atapi_cmd_error(s, SENSE_NOT_READY, ASC_MEDIUM_NOT_PRESENT);
 
         s->cdrom_changed = 0;

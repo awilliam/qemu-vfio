@@ -24,6 +24,7 @@
 #include "boards.h"
 #include "blockdev.h"
 #include "sysbus.h"
+#include "exec-memory.h"
 
 #undef REG_FMT
 #define REG_FMT			"0x%02lx"
@@ -48,7 +49,7 @@
 
 typedef struct {
     SysBusDevice busdev;
-    NANDFlashState *nand;
+    DeviceState *nand;
     uint8_t ctl;
     uint8_t manf_id;
     uint8_t chip_id;
@@ -169,11 +170,13 @@ static void sl_flash_register(PXA2xxState *cpu, int size)
 static int sl_nand_init(SysBusDevice *dev) {
     int iomemtype;
     SLNANDState *s;
+    DriveInfo *nand;
 
     s = FROM_SYSBUS(SLNANDState, dev);
 
     s->ctl = 0;
-    s->nand = nand_init(s->manf_id, s->chip_id);
+    nand = drive_get(IF_MTD, 0, 0);
+    s->nand = nand_init(nand ? nand->bdrv : NULL, s->manf_id, s->chip_id);
 
     iomemtype = cpu_register_io_memory(sl_readfn,
                     sl_writefn, s, DEVICE_NATIVE_ENDIAN);
@@ -706,17 +709,13 @@ static void spitz_ssp_attach(PXA2xxState *cpu)
 static void spitz_microdrive_attach(PXA2xxState *cpu, int slot)
 {
     PCMCIACardState *md;
-    BlockDriverState *bs;
     DriveInfo *dinfo;
 
     dinfo = drive_get(IF_IDE, 0, 0);
-    if (!dinfo)
+    if (!dinfo || dinfo->media_cd)
         return;
-    bs = dinfo->bdrv;
-    if (bdrv_is_inserted(bs) && !bdrv_is_removable(bs)) {
-        md = dscm1xxxx_init(dinfo);
-        pxa2xx_pcmcia_attach(cpu->pcmcia[slot], md);
-    }
+    md = dscm1xxxx_init(dinfo);
+    pxa2xx_pcmcia_attach(cpu->pcmcia[slot], md);
 }
 
 /* Wm8750 and Max7310 on I2C */
@@ -898,12 +897,13 @@ static void spitz_common_init(ram_addr_t ram_size,
 {
     PXA2xxState *cpu;
     DeviceState *scp0, *scp1 = NULL;
+    MemoryRegion *address_space_mem = get_system_memory();
 
     if (!cpu_model)
         cpu_model = (model == terrier) ? "pxa270-c5" : "pxa270-c0";
 
     /* Setup CPU & memory */
-    cpu = pxa270_init(spitz_binfo.ram_size, cpu_model);
+    cpu = pxa270_init(address_space_mem, spitz_binfo.ram_size, cpu_model);
 
     sl_flash_register(cpu, (model == spitz) ? FLASH_128M : FLASH_1024M);
 

@@ -4,6 +4,7 @@
 /* ISA bus */
 
 #include "ioport.h"
+#include "memory.h"
 #include "qdev.h"
 
 typedef struct ISABus ISABus;
@@ -12,10 +13,12 @@ typedef struct ISADeviceInfo ISADeviceInfo;
 
 struct ISADevice {
     DeviceState qdev;
+    MemoryRegion *io[32];
     uint32_t isairq[2];
-    int nirqs;
     uint16_t ioports[32];
+    int nirqs;
     int nioports;
+    int nio;
 };
 
 typedef int (*isa_qdev_initfn)(ISADevice *dev);
@@ -24,19 +27,22 @@ struct ISADeviceInfo {
     isa_qdev_initfn init;
 };
 
-ISABus *isa_bus_new(DeviceState *dev);
+ISABus *isa_bus_new(DeviceState *dev, MemoryRegion *address_space_io);
 void isa_bus_irqs(qemu_irq *irqs);
 qemu_irq isa_get_irq(int isairq);
 void isa_init_irq(ISADevice *dev, qemu_irq *p, int isairq);
+void isa_register_ioport(ISADevice *dev, MemoryRegion *io, uint16_t start);
 void isa_init_ioport(ISADevice *dev, uint16_t ioport);
 void isa_init_ioport_range(ISADevice *dev, uint16_t start, uint16_t length);
 void isa_qdev_register(ISADeviceInfo *info);
+MemoryRegion *isa_address_space(ISADevice *dev);
 ISADevice *isa_create(const char *name);
 ISADevice *isa_try_create(const char *name);
 ISADevice *isa_create_simple(const char *name);
 
 extern target_phys_addr_t isa_mem_base;
 
+void isa_mmio_setup(MemoryRegion *mr, target_phys_addr_t size);
 void isa_mmio_init(target_phys_addr_t base, target_phys_addr_t size);
 
 /* dma.c */

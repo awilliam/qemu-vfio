@@ -22,6 +22,8 @@
  * THE SOFTWARE.
  */
 
+#include <glib.h>
+
 #include "hw.h"
 #include "pc.h"
 #include "apic.h"
@@ -39,6 +41,8 @@
 #include "blockdev.h"
 #include "smbus.h"
 #include "xen.h"
+#include "memory.h"
+#include "exec-memory.h"
 #ifdef CONFIG_XEN
 #  include <xen/hvm/hvm_info_table.h>
 #endif
@@ -66,7 +70,9 @@ static void ioapic_init(IsaIrqState *isa_irq_state)
 }
 
 /* PC hardware initialisation */
-static void pc_init1(ram_addr_t ram_size,
+static void pc_init1(MemoryRegion *system_memory,
+                     MemoryRegion *system_io,
+                     ram_addr_t ram_size,
                      const char *boot_device,
                      const char *kernel_filename,
                      const char *kernel_cmdline,
@@ -89,6 +95,9 @@ static void pc_init1(ram_addr_t ram_size,
     DriveInfo *hd[MAX_IDE_BUS * MAX_IDE_DEVS];
     BusState *idebus[MAX_IDE_BUS];
     ISADevice *rtc_state;
+    MemoryRegion *ram_memory;
+    MemoryRegion *pci_memory;
+    MemoryRegion *rom_memory;
 
     pc_cpus_init(cpu_model);
 
@@ -104,11 +113,43 @@ static void pc_init1(ram_addr_t ram_size,
         below_4g_mem_size = ram_size;
     }
 
+    if (pci_enabled) {
+        pci_memory = g_new(MemoryRegion, 1);
+        memory_region_init(pci_memory, "pci", INT64_MAX);
+        rom_memory = pci_memory;
+    } else {
+        pci_memory = NULL;
+        rom_memory = system_memory;
+    }
+
     /* allocate ram and load rom/bios */
     if (!xen_enabled()) {
-        pc_memory_init(kernel_filename, kernel_cmdline, initrd_filename,
-                       below_4g_mem_size, above_4g_mem_size);
+        pc_memory_init(system_memory,
+                       kernel_filename, kernel_cmdline, initrd_filename,
+                       below_4g_mem_size, above_4g_mem_size,
+                       pci_enabled ? rom_memory : system_memory, &ram_memory);
     }
+
+    isa_irq_state = g_malloc0(sizeof(*isa_irq_state));
+    isa_irq = qemu_allocate_irqs(isa_irq_handler, isa_irq_state, 24);
+
+    if (pci_enabled) {
+        pci_bus = i440fx_init(&i440fx_state, &piix3_devfn, isa_irq,
+                              system_memory, system_io, ram_size,
+                              below_4g_mem_size,
+                              0x100000000ULL - below_4g_mem_size,
+                              0x100000000ULL + above_4g_mem_size,
+                              (sizeof(target_phys_addr_t) == 4
+                               ? 0
+                               : ((uint64_t)1 << 62)),
+                              pci_memory, ram_memory);
+    } else {
+        pci_bus = NULL;
+        i440fx_state = NULL;
+        isa_bus_new(NULL, system_io);
+        no_hpet = 1;
+    }
+    isa_bus_irqs(isa_irq);
 
     if (!xen_enabled()) {
         cpu_irq = pc_allocate_cpu_irq();
@@ -116,21 +157,11 @@ static void pc_init1(ram_addr_t ram_size,
     } else {
         i8259 = xen_interrupt_controller_init();
     }
-    isa_irq_state = qemu_mallocz(sizeof(*isa_irq_state));
+
     isa_irq_state->i8259 = i8259;
     if (pci_enabled) {
         ioapic_init(isa_irq_state);
     }
-    isa_irq = qemu_allocate_irqs(isa_irq_handler, isa_irq_state, 24);
-
-    if (pci_enabled) {
-        pci_bus = i440fx_init(&i440fx_state, &piix3_devfn, isa_irq, ram_size);
-    } else {
-        pci_bus = NULL;
-        i440fx_state = NULL;
-        isa_bus_new(NULL);
-    }
-    isa_bus_irqs(isa_irq);
 
     pc_register_ferr_irq(isa_get_irq(13));
 
@@ -155,7 +186,11 @@ static void pc_init1(ram_addr_t ram_size,
     ide_drive_get(hd, MAX_IDE_BUS);
     if (pci_enabled) {
         PCIDevice *dev;
-        dev = pci_piix3_ide_init(pci_bus, hd, piix3_devfn + 1);
+        if (xen_enabled()) {
+            dev = pci_piix3_xen_ide_init(pci_bus, hd, piix3_devfn + 1);
+        } else {
+            dev = pci_piix3_ide_init(pci_bus, hd, piix3_devfn + 1);
+        }
         idebus[0] = qdev_get_child_bus(&dev->qdev, "ide.0");
         idebus[1] = qdev_get_child_bus(&dev->qdev, "ide.1");
     } else {
@@ -192,10 +227,6 @@ static void pc_init1(ram_addr_t ram_size,
         smbus_eeprom_init(smbus, 8, NULL, 0);
     }
 
-    if (i440fx_state) {
-        i440fx_init_memory_mappings(i440fx_state);
-    }
-
     if (pci_enabled) {
         pc_pci_device_init(pci_bus);
     }
@@ -208,7 +239,9 @@ static void pc_init_pci(ram_addr_t ram_size,
                         const char *initrd_filename,
                         const char *cpu_model)
 {
-    pc_init1(ram_size, boot_device,
+    pc_init1(get_system_memory(),
+             get_system_io(),
+             ram_size, boot_device,
              kernel_filename, kernel_cmdline,
              initrd_filename, cpu_model, 1, 1);
 }
@@ -220,7 +253,9 @@ static void pc_init_pci_no_kvmclock(ram_addr_t ram_size,
                                     const char *initrd_filename,
                                     const char *cpu_model)
 {
-    pc_init1(ram_size, boot_device,
+    pc_init1(get_system_memory(),
+             get_system_io(),
+             ram_size, boot_device,
              kernel_filename, kernel_cmdline,
              initrd_filename, cpu_model, 1, 0);
 }
@@ -234,7 +269,9 @@ static void pc_init_isa(ram_addr_t ram_size,
 {
     if (cpu_model == NULL)
         cpu_model = "486";
-    pc_init1(ram_size, boot_device,
+    pc_init1(get_system_memory(),
+             get_system_io(),
+             ram_size, boot_device,
              kernel_filename, kernel_cmdline,
              initrd_filename, cpu_model, 0, 1);
 }
