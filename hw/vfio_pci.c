@@ -397,168 +397,43 @@ static void vfio_disable_msi(VFIODevice *vdev, bool msix)
 /*
  * IO Port/MMIO
  */
-static void vfio_resource_write(PCIResource *res, uint32_t addr,
-                                uint32_t val, int len)
+static void vfio_resource_write(void *opaque, target_phys_addr_t addr,
+                                uint64_t data, unsigned size)
 {
-    if (pwrite(res->fd, &val, len, res->offset + addr) != len) {
-        fprintf(stderr, "%s(,0x%x, 0x%x, %d) failed: %s\n",
-                __FUNCTION__, addr, val, len, strerror(errno));
+    PCIResource *res = opaque;
+
+    if (pwrite(res->fd, &data, size, res->offset + addr) != size) {
+        fprintf(stderr, "%s(,0x%"PRIx64", 0x%"PRIx64", %d) failed: %s\n",
+                __FUNCTION__, addr, data, size, strerror(errno));
     }
-    DPRINTF("%s(BAR%d+0x%x, 0x%x, %d)\n", __FUNCTION__, res->bar,
-            addr, val, len);
+
+    DPRINTF("%s(BAR%d+0x%"PRIx64", 0x%"PRIx64", %d)\n",
+            __FUNCTION__, res->bar, addr, data, size);
 }
 
-static void vfio_resource_writeb(void *opaque, target_phys_addr_t addr,
-                                 uint32_t val)
+static uint64_t vfio_resource_read(void *opaque,
+                                   target_phys_addr_t addr, unsigned size)
 {
-    vfio_resource_write(opaque, addr, val, 1);
+    PCIResource *res = opaque;
+    uint64_t data = 0;
+
+    if (pread(res->fd, &data, size, res->offset + addr) != size) {
+        fprintf(stderr, "%s(,0x%"PRIx64", %d) failed: %s\n",
+                __FUNCTION__, addr, size, strerror(errno));
+        return (uint64_t)-1;
+    }
+
+    DPRINTF("%s(BAR%d+0x%"PRIx64", %d) = 0x%"PRIx64"\n",
+            __FUNCTION__, res->bar, addr, size, data);
+
+    return data;
 }
 
-static void vfio_resource_writew(void *opaque, target_phys_addr_t addr,
-                                 uint32_t val)
-{
-    vfio_resource_write(opaque, addr, val, 2);
-}
-
-static void vfio_resource_writel(void *opaque, target_phys_addr_t addr,
-                                 uint32_t val)
-{
-    vfio_resource_write(opaque, addr, val, 4);
-}
-
-static CPUWriteMemoryFunc * const vfio_resource_writes[] = {
-    &vfio_resource_writeb,
-    &vfio_resource_writew,
-    &vfio_resource_writel
+static const MemoryRegionOps vfio_resource_ops = {
+    .read = vfio_resource_read,
+    .write = vfio_resource_write,
+    .endianness = DEVICE_NATIVE_ENDIAN,
 };
-
-static void vfio_ioport_writeb(void *opaque, uint32_t addr, uint32_t val)
-{
-    PCIResource *res = opaque;
-    vfio_resource_write(res, addr - res->e_phys, val, 1);
-}
-
-static void vfio_ioport_writew(void *opaque, uint32_t addr, uint32_t val)
-{
-    PCIResource *res = opaque;
-    vfio_resource_write(res, addr - res->e_phys, val, 2);
-}
-
-static void vfio_ioport_writel(void *opaque, uint32_t addr, uint32_t val)
-{
-    PCIResource *res = opaque;
-    vfio_resource_write(res, addr - res->e_phys, val, 4);
-}
-
-static uint32_t vfio_resource_read(PCIResource *res, uint32_t addr, int len)
-{
-    uint32_t val;
-
-    if (pread(res->fd, &val, len, res->offset + addr) != len) {
-        fprintf(stderr, "%s(,0x%x, %d) failed: %s\n",
-                __FUNCTION__, addr, len, strerror(errno));
-        return 0xffffffffU;
-    }
-    DPRINTF("%s(BAR%d+0x%x, %d) = 0x%x\n", __FUNCTION__, res->bar,
-            addr, len, val);
-    return val;
-}
-
-static uint32_t vfio_resource_readb(void *opaque, target_phys_addr_t addr)
-{
-    return vfio_resource_read(opaque, addr, 1) & 0xff;
-}
-
-static uint32_t vfio_resource_readw(void *opaque, target_phys_addr_t addr)
-{
-    return vfio_resource_read(opaque, addr, 2) & 0xffff;
-}
-
-static uint32_t vfio_resource_readl(void *opaque, target_phys_addr_t addr)
-{
-    return vfio_resource_read(opaque, addr, 4);
-}
-
-static CPUReadMemoryFunc * const vfio_resource_reads[] = {
-    &vfio_resource_readb,
-    &vfio_resource_readw,
-    &vfio_resource_readl
-};
-
-static uint32_t vfio_ioport_readb(void *opaque, uint32_t addr)
-{
-    PCIResource *res = opaque;
-    return vfio_resource_read(res, addr - res->e_phys, 1) & 0xff;
-}
-
-static uint32_t vfio_ioport_readw(void *opaque, uint32_t addr)
-{
-    PCIResource *res = opaque;
-    return vfio_resource_read(res, addr - res->e_phys, 2) & 0xffff;
-}
-
-static uint32_t vfio_ioport_readl(void *opaque, uint32_t addr)
-{
-    PCIResource *res = opaque;
-    return vfio_resource_read(res, addr - res->e_phys, 4);
-}
-
-static void vfio_ioport_map(PCIDevice *pdev, int bar,
-                            pcibus_t e_phys, pcibus_t e_size, int type)
-{
-    VFIODevice *vdev = DO_UPCAST(VFIODevice, pdev, pdev);
-    PCIResource *res = &vdev->resources[bar];
-
-    DPRINTF("%s(%04x:%02x:%02x.%x, %d, 0x%" PRIx64 ", 0x%" PRIx64 ", %d)\n",
-            __FUNCTION__, vdev->host.seg, vdev->host.bus, vdev->host.dev,
-            vdev->host.func, bar, e_phys, e_size, type);
-
-    res->e_phys = e_phys;
-    res->e_size = e_size;
-
-    register_ioport_write(e_phys, e_size, 1, vfio_ioport_writeb, res);
-    register_ioport_write(e_phys, e_size, 2, vfio_ioport_writew, res);
-    register_ioport_write(e_phys, e_size, 4, vfio_ioport_writel, res);
-    register_ioport_read(e_phys, e_size, 1, vfio_ioport_readb, res);
-    register_ioport_read(e_phys, e_size, 2, vfio_ioport_readw, res);
-    register_ioport_read(e_phys, e_size, 4, vfio_ioport_readl, res);
-}
-
-static void vfio_iomem_map(PCIDevice *pdev, int bar,
-                           pcibus_t e_phys, pcibus_t e_size, int type)
-{
-    VFIODevice *vdev = DO_UPCAST(VFIODevice, pdev, pdev);
-    PCIResource *res = &vdev->resources[bar];
-
-    DPRINTF("%s(%04x:%02x:%02x.%x, %d, 0x%" PRIx64 ", 0x%" PRIx64 ", %d)\n",
-            __FUNCTION__, vdev->host.seg, vdev->host.bus, vdev->host.dev,
-            vdev->host.func, bar, e_phys, e_size, type);
-
-    res->e_phys = e_phys;
-    res->e_size = e_size;
-
-    if (res->msix) {
-        if (res->msix_offset > 0) {
-            cpu_register_physical_memory(e_phys, res->msix_offset, res->slow ?
-                                         res->io_mem : res->memory_index[0]);
-        }
-
-        DPRINTF("Overlaying MSI-X table page\n");
-        msix_mmio_map(pdev, bar, e_phys, e_size, type);
-
-        if (e_size > res->msix_offset + MSIX_PAGE_SIZE) {
-            uint32_t offset = res->msix_offset + MSIX_PAGE_SIZE;
-            e_phys += offset;
-            e_size -= offset;
-            cpu_register_physical_memory_offset(e_phys, e_size,
-                            res->slow ? res->io_mem : res->memory_index[1],
-                            res->slow ? offset : 0);
-        }
-    } else {
-        cpu_register_physical_memory(e_phys, e_size, res->slow ?
-                                     res->io_mem : res->memory_index[0]);
-    }
-}
 
 /*
  * PCI config space
@@ -815,8 +690,7 @@ static int vfio_setup_msi(VFIODevice *vdev)
 
     if ((pos = vfio_find_cap_offset(&vdev->pdev, PCI_CAP_ID_MSIX))) {
         uint16_t ctrl;
-        uint32_t table, offset;
-        int bar, entries;
+        uint32_t table;
 
         if (pread(vdev->fd, &ctrl, sizeof(ctrl),
                   vdev->config_offset + pos + PCI_CAP_FLAGS) != sizeof(ctrl)) {
@@ -831,22 +705,13 @@ static int vfio_setup_msi(VFIODevice *vdev)
         ctrl = le16_to_cpu(ctrl);
         table = le32_to_cpu(table);
 
-        bar = table & PCI_MSIX_BIR;
-        offset = table & ~PCI_MSIX_BIR;
-        entries = (ctrl & PCI_MSIX_TABSIZE) + 1;
-
-        vdev->resources[bar].msix = true;
-        vdev->resources[bar].msix_offset = offset;
+        vdev->msix = true;
+        vdev->msix_bar = table & PCI_MSIX_BIR;
+        vdev->msix_entries = (ctrl & PCI_MSIX_TABSIZE) + 1;
 
         DPRINTF("%04x:%02x:%02x.%x PCI MSI-X CAP @0x%x, BAR %d, offset 0x%x\n",
                 vdev->host.seg, vdev->host.bus, vdev->host.dev,
-                vdev->host.func, pos, bar, offset);
-
-        if (msix_init(&vdev->pdev, entries,
-                      bar, vdev->resources[bar].size) < 0) {
-            fprintf(stderr, "vfio: msix_init failed\n");
-            return -1;
-        }
+                vdev->host.func, pos, vdev->msix_bar, table & ~PCI_MSIX_BIR);
     }
     return 0;
 }
@@ -854,7 +719,7 @@ static int vfio_setup_msi(VFIODevice *vdev)
 static void vfio_teardown_msi(VFIODevice *vdev)
 {
     msi_uninit(&vdev->pdev);
-    msix_uninit(&vdev->pdev);
+    msix_uninit(&vdev->pdev, &vdev->resources[vdev->msix_bar].region);
 }
 
 /*
@@ -869,6 +734,7 @@ static int vfio_map_resources(VFIODevice *vdev)
         uint32_t bar;
         uint8_t offset;
         int ret, space;
+        char name[32];
 
         res = &vdev->resources[i];
         res->fd = vdev->fd;
@@ -885,119 +751,84 @@ static int vfio_map_resources(VFIODevice *vdev)
                     i, strerror(errno));
             return -1;
         }
+
         bar = le32_to_cpu(bar);
         space = bar & PCI_BASE_ADDRESS_SPACE;
 
-        if (space == PCI_BASE_ADDRESS_SPACE_MEMORY && !(res->size & 0xfff)) {
-            /* Page aligned MMIO BARs - direct map */
-            int prot = PROT_READ | PROT_WRITE;
-            char name[32];
+        if (vdev->pdev.qdev.info->vmsd) {
+            snprintf(name, sizeof(name), "%s.bar%d",
+                     vdev->pdev.qdev.info->vmsd->name, i);
+        } else {
+            snprintf(name, sizeof(name), "%s.bar%d",
+                     vdev->pdev.qdev.info->name, i);
+        }
 
+        if (space == PCI_BASE_ADDRESS_SPACE_MEMORY) {
             res->mem = true;
 
-            if (vdev->pdev.qdev.info->vmsd) {
-                snprintf(name, sizeof(name), "%s.bar%d",
-                         vdev->pdev.qdev.info->vmsd->name, i);
+            if ((res->size & 0xfff) == 0) {
+                /* Page aligned MMIO BARs - direct map */
+                res->virtbase = mmap(NULL, res->size, PROT_READ | PROT_WRITE,
+                                     MAP_SHARED, vdev->fd, res->offset);
+
+                if (res->virtbase == MAP_FAILED) {
+                    fprintf(stderr, "vfio: Failed to mmap BAR %d (%s), "
+                            "using slow access instead\n", i, strerror(errno));
+                    goto slow;
+                }
+
+                memory_region_init_ram_ptr(&res->region, &vdev->pdev.qdev,
+                                           name, res->size, res->virtbase);
             } else {
-                snprintf(name, sizeof(name), "%s.bar%d",
-                         vdev->pdev.qdev.info->name, i);
+                /* Non-page aligned MMIO - slow map */
+slow:
+                /* Note that we could still mmap and do reads/writes from the
+                 * mmap'd region in qemu.  For now we do pread/pwrite to
+                 * exercise that path in VFIO. */
+                res->slow = true;
+
+                DPRINTF("%s(%04x:%02x:%02x.%x) Using slow mapping for BAR %d\n",
+                        __FUNCTION__, vdev->host.seg, vdev->host.bus,
+                        vdev->host.dev, vdev->host.func, i);
+
+                memory_region_init_io(&res->region, &vfio_resource_ops,
+                                      res, name, res->size);
             }
 
-            if (res->msix) {
-                if (res->msix_offset) {
-                    char *c = &name[strlen(name)];
+            if (vdev->msix && vdev->msix_bar == i) {
+                if (msix_init(&vdev->pdev, vdev->msix_entries,
+                              &res->region, i, res->size) < 0) {
+                    memory_region_destroy(&res->region);
 
-                    res->r_virtbase[0] = mmap(NULL, res->msix_offset, prot,
-                                              MAP_SHARED, vdev->fd,
-                                              res->offset);
-
-                    if (res->r_virtbase[0] == MAP_FAILED) {
-                        fprintf(stderr, "vfio: Failed to mmap BAR %d.0 (%s)\n",
-                                i, strerror(errno));
-                        return -1;
+                    if (!res->slow) {
+                        munmap(res->virtbase, res->size);
                     }
-                    strncat(name, ".0", sizeof(name));
-                    res->memory_index[0] =
-                        qemu_ram_alloc_from_ptr(&vdev->pdev.qdev,
-                                                name, res->msix_offset,
-                                                res->r_virtbase[0]);
-                    *c = 0;
-                }
-                if (res->size > res->msix_offset + MSIX_PAGE_SIZE) {
-                    char *c = &name[strlen(name)];
 
-                    res->r_virtbase[1] = mmap(NULL,
-                               res->size - res->msix_offset - MSIX_PAGE_SIZE,
-                               prot, MAP_SHARED, vdev->fd,
-                               res->offset + res->msix_offset + MSIX_PAGE_SIZE);
-
-                    if (res->r_virtbase[1] == MAP_FAILED) {
-                        fprintf(stderr, "vfio: Failed to mmap BAR %d.1 (%s)\n",
-                                i, strerror(errno));
-                        return -1;
-                    }
-                    strncat(name, ".1", sizeof(name));
-                    res->memory_index[1] =
-                        qemu_ram_alloc_from_ptr(&vdev->pdev.qdev, name,
-                                  res->size - MSIX_PAGE_SIZE - res->msix_offset,
-                                  res->r_virtbase[1]);
-                    *c = 0;
-                }
-            } else {
-                res->r_virtbase[0] = mmap(NULL, res->size, prot, MAP_SHARED,
-                                          vdev->fd, res->offset);
-
-                if (res->r_virtbase[0] == MAP_FAILED) {
-                    fprintf(stderr, "vfio: Failed to mmap BAR %d (%s)\n",
-                            i, strerror(errno));
+                    fprintf(stderr, "vfio: msix_init failed\n");
                     return -1;
                 }
-                res->memory_index[0] =
-                    qemu_ram_alloc_from_ptr(&vdev->pdev.qdev, name,
-                                            res->size, res->r_virtbase[0]);
             }
 
-            pci_register_bar(&vdev->pdev, i, res->size,
+            pci_register_bar(&vdev->pdev, i,
                              bar & PCI_BASE_ADDRESS_MEM_PREFETCH ?
                              PCI_BASE_ADDRESS_MEM_PREFETCH :
                              PCI_BASE_ADDRESS_SPACE_MEMORY,
-                             vfio_iomem_map);
+                             &res->region);
 
             if (bar & PCI_BASE_ADDRESS_MEM_TYPE_64) {
                 i++;
             }
-        } else if (space == PCI_BASE_ADDRESS_SPACE_MEMORY) {
-            /* Non-page aligned MMIO - slow map */
 
-            /* Note that we could still mmap and do reads/writes from the
-             * mmap'd region in qemu.  For now we do pread/pwrite to
-             * exercise that path in VFIO. */
-
-            res->mem = true;
-            res->slow = true;
-
-            DPRINTF("%s(%04x:%02x:%02x.%x) Using slow mapping for BAR %d\n",
-                    __FUNCTION__, vdev->host.seg, vdev->host.bus,
-                    vdev->host.dev, vdev->host.func, i);
-
-            res->io_mem = cpu_register_io_memory(vfio_resource_reads,
-                                                 vfio_resource_writes,
-                                                 res, DEVICE_NATIVE_ENDIAN);
-
-            pci_register_bar(&vdev->pdev, i, res->size,
-                             bar & PCI_BASE_ADDRESS_MEM_PREFETCH ?
-                             PCI_BASE_ADDRESS_MEM_PREFETCH :
-                             PCI_BASE_ADDRESS_SPACE_MEMORY,
-                             vfio_iomem_map);
-
-            if (bar & PCI_BASE_ADDRESS_MEM_TYPE_64) {
-                i++;
-            }
+            res->valid = true;
         } else if (space == PCI_BASE_ADDRESS_SPACE_IO) {
-            pci_register_bar(&vdev->pdev, i, res->size,
-                             PCI_BASE_ADDRESS_SPACE_IO, vfio_ioport_map);
+
+            memory_region_init_io(&res->region, &vfio_resource_ops, res,
+                                  name, res->size);
+
+            pci_register_bar(&vdev->pdev, i,
+                             PCI_BASE_ADDRESS_SPACE_IO, &res->region);
+            res->valid = true;
         }
-        res->valid = true;
     }
     return 0;
 }
@@ -1008,34 +839,13 @@ static void vfio_unmap_resources(VFIODevice *vdev)
     PCIResource *res = vdev->resources;
 
     for (i = 0; i < PCI_ROM_SLOT; i++, res++) {
-        if (res->valid && res->mem) {
-            if (res->msix) {
-                if (res->msix_offset) {
-                    cpu_register_physical_memory(res->e_phys, res->msix_offset,
-                                                 IO_MEM_UNASSIGNED);
-                    qemu_ram_free_from_ptr(res->memory_index[0]);
-                    munmap(res->r_virtbase[0], res->msix_offset);
-                }
-                if (res->size > res->msix_offset + MSIX_PAGE_SIZE) {
-                    cpu_register_physical_memory(res->e_phys + MSIX_PAGE_SIZE +
-                                                 res->msix_offset,
-                                                 res->e_size - MSIX_PAGE_SIZE -
-                                                 res->msix_offset,
-                                                 IO_MEM_UNASSIGNED);
-                    qemu_ram_free_from_ptr(res->memory_index[1]);
-                    munmap(res->r_virtbase[1],
-                           res->size - MSIX_PAGE_SIZE - res->msix_offset);
-                }
-            } else {
-                if (!res->slow) {
-                    cpu_register_physical_memory(res->e_phys, res->e_size,
-                                                 IO_MEM_UNASSIGNED);
-                    qemu_ram_free_from_ptr(res->memory_index[0]);
-                    munmap(res->r_virtbase[0], res->size);
-                } else {
-                    cpu_unregister_io_memory(res->io_mem);
-                }
+        if (res->valid) {
+            memory_region_destroy(&res->region);
+
+            if (res->mem && !res->slow) {
+                munmap(res->virtbase, res->size);
             }
+            res->valid = false;
         }
     }
 }
@@ -1201,159 +1011,6 @@ static void vfio_unregister_netlink(VFIODevice *vdev)
 /*
  * General setup
  */
-#if 0
-static int enable_vfio(VFIODevice *vdev)
-{
-    if (vdev->vfiofd_name && strlen(vdev->vfiofd_name) > 0) {
-        if (qemu_isdigit(vdev->vfiofd_name[0])) {
-            vdev->vfiofd = strtol(vdev->vfiofd_name, NULL, 0);
-            return 0;
-        } else {
-            vdev->vfiofd = monitor_get_fd(cur_mon, vdev->vfiofd_name);
-            if (vdev->vfiofd < 0) {
-                fprintf(stderr, "%s: (%s) unkown\n", __func__,
-                        vdev->vfiofd_name);
-                return -1;
-            }
-            return 0;
-        }
-    } else {
-        char vfio_dir[64], vfio_dev[16];
-        DIR *dir;
-        struct dirent *de;
-
-        sprintf(vfio_dir, "/sys/bus/pci/devices/%04x:%02x:%02x.%01x/vfio/",
-                vdev->host.seg, vdev->host.bus,
-                vdev->host.dev, vdev->host.func);
-        dir = opendir(vfio_dir);
-        if (!dir) {
-            error_report("vfio: error: Driver not attached\n");
-            return -1;
-        }
-
-        while ((de = readdir(dir))) {
-            if (de->d_name[0] == '.')
-                continue;
-            if (!strncmp(de->d_name, "vfio", 4))
-                break;
-        }
-
-        if (!de) {
-            error_report("vfio: error: Cannot find vfio* in %s\n", vfio_dir);
-            return -1;
-        }
-
-        sprintf(vfio_dev, "/dev/%s", de->d_name);
-        vdev->vfiofd = open(vfio_dev, O_RDWR);
-        if (vdev->vfiofd < 0) {
-            error_report("pci-assign: vfio: Failed to open %s: %s\n",
-                         vfio_dev, strerror(errno));
-            return -1;
-        }
-        return 0;
-    }
-}
-
-static void disable_vfio(VFIODevice *vdev)
-{
-    /* If we opened it, close it, otherwise leave it alone */
-    if (!(vdev->vfiofd_name && strlen(vdev->vfiofd_name) > 0)) {
-        close(vdev->vfiofd);
-    }
-}
-
-static QLIST_HEAD(, VFIOIOMMU)
-    iommu_list = QLIST_HEAD_INITIALIZER(iommu_list);
-
-static int enable_uiommu(VFIODevice *vdev)
-{
-    int fd;
-    VFIOUIOMMU *uiommu;
-    bool opened = false;
-
-    if (vdev->uiommufd_name && strlen(vdev->uiommufd_name) > 0) {
-        if (qemu_isdigit(vdev->uiommufd_name[0])) {
-            fd = strtol(vdev->uiommufd_name, NULL, 0);
-        } else {
-            fd = monitor_get_fd(cur_mon, vdev->uiommufd_name);
-            if (fd < 0) {
-                fprintf(stderr, "%s: (%s) unkown\n", __func__,
-                        vdev->uiommufd_name);
-                return fd;
-            }
-        }
-    } else if (vdev->flags & VFIO_FLAG_UIOMMU_SHARED &&
-               !QLIST_EMPTY(&uiommu_list)) {
-        fd = QLIST_FIRST(&uiommu_list)->fd;
-    } else {
-        fd = open("/dev/uiommu", O_RDONLY);
-        if (fd < 0) {
-            return -errno;
-        }
-        opened = true;
-    }
-
-    if (ioctl(vdev->vfiofd, VFIO_SET_UIOMMU_DOMAIN, &fd)) {
-        fprintf(stderr, "%s: Failed VFIO_SET_UIOMMU_DOMAIN: %s\n",
-                __FUNCTION__, strerror(errno));
-        return -errno;
-    }
-
-    QLIST_FOREACH(uiommu, &uiommu_list, next) {
-        if (uiommu->fd == fd) {
-            break;
-        }
-    }
-
-    if (!uiommu) {
-        uiommu = g_mallocz(sizeof(*uiommu));
-
-        uiommu->fd = fd;
-        uiommu->opened = opened;
-        QLIST_INSERT_HEAD(&uiommu_list, uiommu, next);
-        QLIST_INIT(&uiommu->vdevs);
-        /* When we register a physical memory client, we'll immediately get
-         * a backlog of memory mappings.  Since these are registered via the
-         * vfio device, we need to have at least one in the list before doing
-         * the registration. */
-        QLIST_INSERT_HEAD(&uiommu->vdevs, vdev, iommu_next);
-        uiommu->client.set_memory = vfio_client_set_memory;
-        uiommu->client.sync_dirty_bitmap = vfio_client_sync_dirty_bitmap;
-        uiommu->client.migration_log = vfio_client_migration_log;
-        cpu_register_phys_memory_client(&uiommu->client);
-    } else {
-        QLIST_INSERT_HEAD(&uiommu->vdevs, vdev, iommu_next);
-    }
-
-    vdev->uiommu = uiommu;
-
-    return 0;
-}
-
-static void disable_uiommu(VFIODevice *vdev)
-{
-    VFIOUIOMMU *uiommu = vdev->uiommu;
-    int fd = -1;
-    
-    ioctl(vdev->vfiofd, VFIO_SET_UIOMMU_DOMAIN, &fd);
-
-    if (!uiommu)
-        return;
-
-    QLIST_REMOVE(vdev, iommu_next);
-    vdev->uiommu = NULL;
-
-    if (QLIST_EMPTY(&uiommu->vdevs)) {
-        cpu_unregister_phys_memory_client(&uiommu->client);
-        QLIST_REMOVE(uiommu, next);
-        if (uiommu->opened) {
-            close(uiommu->fd);
-        }
-        g_free(uiommu);
-    }
-}
-#endif
-
 static int vfio_load_rom(VFIODevice *vdev)
 {
     uint64_t size = vdev->rom_size;
@@ -1366,9 +1023,12 @@ static int vfio_load_rom(VFIODevice *vdev)
     if (vdev->pdev.romfile || !vdev->pdev.rom_bar || !size)
         return 0;
 
+    DPRINTF("%s(%04x:%02x:%02x.%x)\n", __FUNCTION__,
+            vdev->host.seg, vdev->host.bus, vdev->host.dev, vdev->host.func);
+
     snprintf(name, sizeof(name), "%s.rom", vdev->pdev.qdev.info->name);
-    vdev->pdev.rom_offset = qemu_ram_alloc(&vdev->pdev.qdev, name, size);
-    ptr = qemu_get_ram_ptr(vdev->pdev.rom_offset);
+    memory_region_init_ram(&vdev->pdev.rom, &vdev->pdev.qdev, name, size);
+    ptr = memory_region_get_ram_ptr(&vdev->pdev.rom);
     memset(ptr, 0xff, size);
 
     while (size) {
@@ -1384,14 +1044,13 @@ static int vfio_load_rom(VFIODevice *vdev)
             }
             fprintf(stderr, "vfio: Error reading device ROM: %s\n",
                     strerror(errno));
-            qemu_ram_free(vdev->pdev.rom_offset);
-            vdev->pdev.rom_offset = 0;
+            memory_region_destroy(&vdev->pdev.rom);
             return -1;
         }
     }
 
-    pci_register_bar(&vdev->pdev, PCI_ROM_SLOT, vdev->rom_size,
-                     0, pci_map_option_rom);
+    pci_register_bar(&vdev->pdev, PCI_ROM_SLOT, 0, &vdev->pdev.rom);
+    vdev->pdev.has_rom = true;
     return 0;
 }
 

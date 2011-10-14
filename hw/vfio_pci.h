@@ -14,20 +14,15 @@ typedef struct PCIHostDevice {
 } PCIHostDevice;
 
 typedef struct PCIResource {
+    off_t offset;
+    int fd;
+    MemoryRegion region;
     bool valid;
     bool mem;
-    bool msix;
     bool slow;
-    uint8_t bar;
     size_t size;
-    ram_addr_t memory_index[2];  /* cpu_register_physical_memory() index */
-    void *r_virtbase[2];         /* mmapped address */
-    int io_mem;                  /* cpu_register_io_memory index */
-    pcibus_t e_phys;             /* emulated base address */
-    pcibus_t e_size;             /* emulated size of region in bytes */
-    uint32_t msix_offset;
-    off_t offset;
-    int fd;                      /* see vfio_resource_read/write */
+    void *virtbase;
+    uint8_t bar;
 } PCIResource;
 
 typedef struct INTx {
@@ -81,6 +76,9 @@ typedef struct VFIODevice {
     uint32_t flags;
     struct VFIOGroup *group;
     bool reset_works;
+    bool msix;
+    uint8_t msix_bar;
+    uint16_t msix_entries;
 } VFIODevice;
 
 typedef struct VFIOGroup {
