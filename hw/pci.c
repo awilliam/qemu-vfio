@@ -887,14 +887,15 @@ static int pci_unregister_device(DeviceState *dev)
     PCIDeviceInfo *info = DO_UPCAST(PCIDeviceInfo, qdev, dev->info);
     int ret = 0;
 
+    pci_unregister_io_regions(pci_dev);
+    pci_del_option_rom(pci_dev);
+    g_free(pci_dev->romfile);
+
     if (info->exit)
         ret = info->exit(pci_dev);
     if (ret)
         return ret;
 
-    pci_unregister_io_regions(pci_dev);
-    pci_del_option_rom(pci_dev);
-    g_free(pci_dev->romfile);
     do_pci_unregister_device(pci_dev);
     return 0;
 }
