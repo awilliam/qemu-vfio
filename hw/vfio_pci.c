@@ -1090,11 +1090,13 @@ static VFIOGroup *vfio_get_group(unsigned int groupid)
 
 static void vfio_put_group(VFIOGroup *group)
 {
-    if (QLIST_EMPTY(&group->device_list)) {
-        QLIST_REMOVE(group, group_next);
-        close(group->fd);
-        g_free(group);
+    if (!QLIST_EMPTY(&group->device_list)) {
+        return;
     }
+
+    QLIST_REMOVE(group, group_next);
+    close(group->fd);
+    g_free(group);
 }
 
 static int __vfio_get_device(VFIOGroup *group,
@@ -1246,7 +1248,7 @@ static void vfio_put_device(VFIODevice *vdev)
     close(vdev->fd);
 }
 
-static int vfio_get_iommu(VFIOGroup *group)
+static int vfio_group_new_iommu(VFIOGroup *group)
 {
     group->iommu = g_malloc0(sizeof(*(group->iommu)));
     group->iommu->fd = ioctl(group->fd, VFIO_GROUP_GET_IOMMU_FD);
@@ -1266,12 +1268,23 @@ static int vfio_get_iommu(VFIOGroup *group)
     return 0;
 }
 
-static void vfio_put_iommu(VFIOGroup *group)
+static void vfio_group_put_iommu(VFIOGroup *group)
 {
+    if (!QLIST_EMPTY(&group->device_list)) {
+        return;
+    }
+
     QLIST_REMOVE(group, iommu_next);
     if (QLIST_EMPTY(&group->iommu->group_list)) {
         cpu_unregister_phys_memory_client(&group->iommu->client);
         close(group->iommu->fd);
+    } else {
+        VFIOGroup *mgroup = QLIST_FIRST(&group->iommu->group_list);
+
+        if (ioctl(mgroup->fd, VFIO_GROUP_UNMERGE, &group->fd) != 0) {
+            error_report("vfio: Failed ot unmerge group: %s (%d)",
+                         strerror(errno), errno);
+        }
     }
     group->iommu = NULL;
 }
@@ -1377,7 +1390,7 @@ static int vfio_initfn(struct PCIDevice *pdev)
     }
 
     if (!group->iommu) {
-        ret = vfio_get_iommu(group);
+        ret = vfio_group_new_iommu(group);
         if (ret) {
             vfio_put_device(vdev);
             vfio_put_group(group);
@@ -1428,8 +1441,8 @@ out_disable_netlink:
     vfio_unregister_netlink(vdev);
 #endif
 out:
-    vfio_put_iommu(group);
     vfio_put_device(vdev);
+    vfio_group_put_iommu(group);
     vfio_put_group(group);
     return -1;
 }
@@ -1445,8 +1458,8 @@ static int vfio_exitfn(struct PCIDevice *pdev)
 #if 0
     vfio_unregister_netlink(vdev);
 #endif
-    vfio_put_iommu(group);
     vfio_put_device(vdev);
+    vfio_group_put_iommu(group);
     vfio_put_group(group);
     return 0;
 }
