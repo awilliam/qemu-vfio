@@ -1069,6 +1069,7 @@ static VFIOGroup *vfio_get_group(unsigned int groupid)
 
     if (!group) {
         char path[32];
+	uint64_t flags;
 
         group = g_malloc0(sizeof(*group));
 
@@ -1076,6 +1077,28 @@ static VFIOGroup *vfio_get_group(unsigned int groupid)
         group->fd = open(path, O_RDWR);
         if (group->fd < 0) {
             error_report("vfio: error opening %s: %s", path, strerror(errno));
+            g_free(group);
+            return NULL;
+        }
+
+        if (ioctl(group->fd, VFIO_GROUP_GET_FLAGS, &flags)) {
+            error_report("vfio: error getting group flags: %s\n",
+                         strerror(errno));
+            close(group->fd);
+            g_free(group);
+            return NULL;
+        }
+
+        if (!(flags & VFIO_GROUP_FLAGS_VIABLE)) {
+            error_report("vfio: error, group %u is not viable, please ensure all devices within the iommu_group are bound to their vfio bus driver.\n", groupid);
+            close(group->fd);
+            g_free(group);
+            return NULL;
+        }
+
+        if (flags & VFIO_GROUP_FLAGS_MM_LOCKED) {
+            error_report("vfio: error, group %u is already locked to another process.\n", groupid);
+            close(group->fd);
             g_free(group);
             return NULL;
         }
@@ -1250,6 +1273,8 @@ static void vfio_put_device(VFIODevice *vdev)
 
 static int vfio_group_new_iommu(VFIOGroup *group)
 {
+    uint64_t flags;
+
     group->iommu = g_malloc0(sizeof(*(group->iommu)));
     group->iommu->fd = ioctl(group->fd, VFIO_GROUP_GET_IOMMU_FD);
     if (group->iommu->fd < 0) {
@@ -1257,6 +1282,22 @@ static int vfio_group_new_iommu(VFIOGroup *group)
                      group->groupid, strerror(errno));
             return -1;
     }
+
+    if (ioctl(group->iommu->fd, VFIO_IOMMU_GET_FLAGS, &flags)) {
+        error_report("vfio: error getting iommu flags: %s", strerror(errno));
+        close(group->iommu->fd);
+        g_free(group->iommu);
+        return -1;
+    }
+
+    if (!(flags & VFIO_IOMMU_FLAGS_MAP_ANY)) {
+        error_report("vfio: iommu for group %u does not support MAP_ANY.",
+                     group->groupid);
+        close(group->iommu->fd);
+        g_free(group->iommu);
+        return -1;
+    }
+
     QLIST_INIT(&group->iommu->group_list);
     QLIST_INSERT_HEAD(&group->iommu->group_list, group, iommu_next);
 
