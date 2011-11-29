@@ -337,12 +337,13 @@ static void vfio_msi_interrupt(void *opaque)
 static void vfio_enable_msi(VFIODevice *vdev, bool msix)
 {
     struct vfio_irq_eventfds *fds;
-    int i, argsz;
+    int ret, i, argsz;
 
     vfio_disable_interrupts(vdev);
 
     vdev->nr_vectors = msix ? vdev->pdev.msix_entries_nr :
                               msi_nr_vectors_allocated(&vdev->pdev);
+retry:
     vdev->msi_vectors = g_malloc(vdev->nr_vectors * sizeof(MSIVector));
 
     argsz = sizeof(*fds) + (vdev->nr_vectors * sizeof(*(fds->eventfds)));
@@ -373,9 +374,15 @@ static void vfio_enable_msi(VFIODevice *vdev, bool msix)
         }
     }
 
-    if (ioctl(vdev->fd, VFIO_DEVICE_SET_IRQ_EVENTFDS, fds)) {
-        fprintf(stderr, "vfio: Error: Failed to setup MSI/X fds %s\n",
-                strerror(errno));
+    ret = ioctl(vdev->fd, VFIO_DEVICE_SET_IRQ_EVENTFDS, fds);
+    if (ret) {
+        if (ret < 0) {
+            fprintf(stderr, "vfio: Error: Failed to setup MSI/X fds %s\n",
+                    strerror(errno));
+        } else if (ret != vdev->nr_vectors) {
+            DPRINTF("%s(): Unable to allocate %d MSI vectors, retry with %d\n",
+                    ret);
+        }
         for (i = 0; i < vdev->nr_vectors; i++) {
             if (msix) {
                 msix_vector_unuse(&vdev->pdev, i);
@@ -385,7 +392,12 @@ static void vfio_enable_msi(VFIODevice *vdev, bool msix)
         }
         g_free(fds);
         g_free(vdev->msi_vectors);
+        if (ret > 0 && ret != vdev->nr_vectors) {
+            vdev->nr_vectors = ret;
+            goto retry;
+        }
         vdev->nr_vectors = 0;
+	
         return;
     }
 
