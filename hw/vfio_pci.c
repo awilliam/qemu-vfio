@@ -863,10 +863,7 @@ slow:
             }
 
             pci_register_bar(&vdev->pdev, i,
-                             bar & PCI_BASE_ADDRESS_MEM_PREFETCH ?
-                             PCI_BASE_ADDRESS_MEM_PREFETCH :
-                             PCI_BASE_ADDRESS_SPACE_MEMORY,
-                             &res->region);
+                             bar & ~PCI_BASE_ADDRESS_MEM_MASK, &res->region);
 
             if (bar & PCI_BASE_ADDRESS_MEM_TYPE_64) {
                 i++;
