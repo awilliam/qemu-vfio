@@ -50,7 +50,7 @@
 #include <linux/types.h>
 #include "linux-vfio.h"
 
-#define DEBUG_VFIO
+//#define DEBUG_VFIO
 #ifdef DEBUG_VFIO
 #define DPRINTF(fmt, ...) \
     do { printf("vfio: " fmt, ## __VA_ARGS__); } while (0)
@@ -159,9 +159,15 @@ static int print_hostaddr(DeviceState *qdev, Property *prop,
  */
 static inline void vfio_unmask_intx(VFIODevice *vdev)
 {
-    int intx = VFIO_PCI_INTX_IRQ_INDEX;
+    struct vfio_unmask_irq unmask =
+        {
+            .argsz = sizeof(unmask),
+            .flags = 0,
+            .index = VFIO_PCI_INTX_IRQ_INDEX,
+            .subindex = 0,
+        };
 
-    ioctl(vdev->fd, VFIO_DEVICE_UNMASK_IRQ, &intx);
+    ioctl(vdev->fd, VFIO_DEVICE_UNMASK_IRQ, &unmask);
 }
 
 static void vfio_intx_interrupt(void *opaque)
@@ -226,12 +232,19 @@ static void vfio_update_irq(Notifier *notify, void *data)
 
 static int vfio_enable_intx(VFIODevice *vdev)
 {
-    int fd[3] = { VFIO_PCI_INTX_IRQ_INDEX, 1 };
+    struct vfio_irq_eventfds *fds;
+    int argsz = sizeof(*fds) + sizeof(*(fds->eventfds));
     uint8_t pin = vfio_pci_read_config(&vdev->pdev, PCI_INTERRUPT_PIN, 1);
 
     if (!pin) {
         return 0;
     }
+
+    fds = g_malloc(argsz);
+    fds->argsz = argsz;
+    fds->flags = 0;
+    fds->index = VFIO_PCI_INTX_IRQ_INDEX;
+    fds->count = 1;
 
     vfio_disable_interrupts(vdev);
 
@@ -245,15 +258,17 @@ static int vfio_enable_intx(VFIODevice *vdev)
 
     if (event_notifier_init(&vdev->intx.interrupt, 0)) {
         fprintf(stderr, "vfio: Error: event_notifier_init failed\n");
+        g_free(fds);
         return -1;
     }
 
-    fd[2] = event_notifier_get_fd(&vdev->intx.interrupt);
-    qemu_set_fd_handler(fd[2], vfio_intx_interrupt, NULL, vdev);
+    fds->eventfds[0] = event_notifier_get_fd(&vdev->intx.interrupt);
+    qemu_set_fd_handler(fds->eventfds[0], vfio_intx_interrupt, NULL, vdev);
 
-    if (ioctl(vdev->fd, VFIO_DEVICE_SET_IRQ_EVENTFDS, fd)) {
+    if (ioctl(vdev->fd, VFIO_DEVICE_SET_IRQ_EVENTFDS, fds)) {
         fprintf(stderr, "vfio: Error: Failed to setup INTx fd %s\n",
                 strerror(errno));
+        g_free(fds);
         return -1;
     }
 
@@ -264,20 +279,29 @@ static int vfio_enable_intx(VFIODevice *vdev)
     DPRINTF("%s(%04x:%02x:%02x.%x)\n", __FUNCTION__, vdev->host.seg,
             vdev->host.bus, vdev->host.dev, vdev->host.func);
 
+    g_free(fds);
+
     return 0;
 }
 
 static void vfio_disable_intx(VFIODevice *vdev)
 {
-    int fd[2] = { VFIO_PCI_INTX_IRQ_INDEX, 0 };
+    int fd;
+    struct vfio_irq_eventfds fds =
+        {
+            .argsz = sizeof(fds),
+            .flags = 0,
+            .index = VFIO_PCI_INTX_IRQ_INDEX,
+            .count = 0,
+        };
 
-    ioctl(vdev->fd, VFIO_DEVICE_SET_IRQ_EVENTFDS, fd);
+    ioctl(vdev->fd, VFIO_DEVICE_SET_IRQ_EVENTFDS, &fds);
 
     pci_remove_irq_update_notifier(&vdev->pdev, &vdev->intx.update_irq);
     ioapic_remove_gsi_eoi_notifier(&vdev->intx.eoi, vdev->intx.irq);
 
-    fd[0] = event_notifier_get_fd(&vdev->intx.interrupt);
-    qemu_set_fd_handler(fd[0], NULL, NULL, vdev);
+    fd = event_notifier_get_fd(&vdev->intx.interrupt);
+    qemu_set_fd_handler(fd, NULL, NULL, vdev);
     event_notifier_cleanup(&vdev->intx.interrupt);
 
     vdev->interrupt = INT_NONE;
@@ -312,7 +336,8 @@ static void vfio_msi_interrupt(void *opaque)
 
 static void vfio_enable_msi(VFIODevice *vdev, bool msix)
 {
-    int i, *fds;
+    struct vfio_irq_eventfds *fds;
+    int i, argsz;
 
     vfio_disable_interrupts(vdev);
 
@@ -320,11 +345,16 @@ static void vfio_enable_msi(VFIODevice *vdev, bool msix)
                               msi_nr_vectors_allocated(&vdev->pdev);
     vdev->msi_vectors = g_malloc(vdev->nr_vectors * sizeof(MSIVector));
 
-    fds = g_malloc((vdev->nr_vectors + 2) * sizeof(int));
-    fds[0] = msix ? VFIO_PCI_MSIX_IRQ_INDEX : VFIO_PCI_MSI_IRQ_INDEX;
-    fds[1] = vdev->nr_vectors;
+    argsz = sizeof(*fds) + (vdev->nr_vectors * sizeof(*(fds->eventfds)));
+    fds = g_malloc(argsz);
+    fds->argsz = argsz;
+    fds->flags = 0;
+    fds->index = msix ? VFIO_PCI_MSIX_IRQ_INDEX : VFIO_PCI_MSI_IRQ_INDEX;
+    fds->count = vdev->nr_vectors;
 
     for (i = 0; i < vdev->nr_vectors; i++) {
+        int fd;
+
         vdev->msi_vectors[i].vdev = vdev;
         vdev->msi_vectors[i].vector = i;
 
@@ -332,9 +362,11 @@ static void vfio_enable_msi(VFIODevice *vdev, bool msix)
             fprintf(stderr, "vfio: Error: event_notifier_init failed\n");
         }
 
-        fds[i + 2] = event_notifier_get_fd(&vdev->msi_vectors[i].interrupt);
-        qemu_set_fd_handler(fds[i + 2], vfio_msi_interrupt, NULL,
+        fd = event_notifier_get_fd(&vdev->msi_vectors[i].interrupt);
+        qemu_set_fd_handler(fd, vfio_msi_interrupt, NULL,
                             &vdev->msi_vectors[i]);
+
+        fds->eventfds[i] = fd;
 
         if (msix && msix_vector_use(&vdev->pdev, i) < 0) {
             fprintf(stderr, "vfio: Error msix_vector_use\n");
@@ -348,7 +380,7 @@ static void vfio_enable_msi(VFIODevice *vdev, bool msix)
             if (msix) {
                 msix_vector_unuse(&vdev->pdev, i);
             }
-            qemu_set_fd_handler(fds[i + 1], NULL, NULL, NULL);
+            qemu_set_fd_handler(fds->eventfds[i], NULL, NULL, NULL);
             event_notifier_cleanup(&vdev->msi_vectors[i].interrupt);
         }
         g_free(fds);
@@ -368,7 +400,13 @@ static void vfio_enable_msi(VFIODevice *vdev, bool msix)
 
 static void vfio_disable_msi(VFIODevice *vdev, bool msix)
 {
-    int fds[2] = { msix ? VFIO_PCI_MSIX_IRQ_INDEX : VFIO_PCI_MSI_IRQ_INDEX, 0 };
+    struct vfio_irq_eventfds fds =
+        {
+            .argsz = sizeof(fds),
+            .flags = 0,
+            .index = msix ? VFIO_PCI_MSIX_IRQ_INDEX : VFIO_PCI_MSI_IRQ_INDEX,
+            .count = 0,
+        };
     int i;
 
     ioctl(vdev->fd, VFIO_DEVICE_SET_IRQ_EVENTFDS, &fds);
@@ -527,14 +565,16 @@ static void vfio_pci_write_config(PCIDevice *pdev, uint32_t addr,
 static int vfio_dma_map(VFIOIOMMU *iommu, target_phys_addr_t start_addr,
                         ram_addr_t size, ram_addr_t phys_offset)
 {
-    struct vfio_dma_map dma_map;
+    struct vfio_dma_map map =
+        {
+            .argsz = sizeof(map),
+            .flags = VFIO_DMA_MAP_FLAG_READ | VFIO_DMA_MAP_FLAG_WRITE,
+            .vaddr = (uintptr_t)qemu_get_ram_ptr(phys_offset),
+            .iova = start_addr,
+            .size = size,
+        };
 
-    dma_map.vaddr = (uintptr_t)qemu_get_ram_ptr(phys_offset);
-    dma_map.dmaaddr = start_addr;
-    dma_map.flags = VFIO_DMA_MAP_FLAG_WRITE;
-    dma_map.size = size;
-
-    if (ioctl(iommu->fd, VFIO_IOMMU_MAP_DMA, &dma_map)) {
+    if (ioctl(iommu->fd, VFIO_IOMMU_MAP_DMA, &map)) {
         DPRINTF("VFIO_MAP_DMA: %d\n", errno);
         return -errno;
     }
@@ -545,14 +585,15 @@ static int vfio_dma_map(VFIOIOMMU *iommu, target_phys_addr_t start_addr,
 static int vfio_dma_unmap(VFIOIOMMU *iommu, target_phys_addr_t start_addr,
                           ram_addr_t size, ram_addr_t phys_offset)
 {
-    struct vfio_dma_map dma_map;
+    struct vfio_dma_unmap unmap =
+        {
+            .argsz = sizeof(unmap),
+            .flags = 0,
+            .iova = start_addr,
+            .size = size,
+        };
 
-    dma_map.vaddr = (uintptr_t)qemu_get_ram_ptr(phys_offset);
-    dma_map.dmaaddr = start_addr;
-    dma_map.flags = VFIO_DMA_MAP_FLAG_WRITE;
-    dma_map.size = size;
-
-    if (ioctl(iommu->fd, VFIO_IOMMU_UNMAP_DMA, &dma_map)) {
+    if (ioctl(iommu->fd, VFIO_IOMMU_UNMAP_DMA, &unmap)) {
         DPRINTF("VFIO_UNMAP_DMA: %d\n", errno);
         return -errno;
     }
@@ -1069,11 +1110,11 @@ static VFIOGroup *vfio_get_group(unsigned int groupid)
 
     if (!group) {
         char path[32];
-	uint64_t flags;
+        struct vfio_group_info info = { .argsz = sizeof(info) };
 
         group = g_malloc0(sizeof(*group));
 
-        sprintf(path, "/dev/vfio/%u", groupid);
+        sprintf(path, "/dev/vfio/pci/%u", groupid);
         group->fd = open(path, O_RDWR);
         if (group->fd < 0) {
             error_report("vfio: error opening %s: %s", path, strerror(errno));
@@ -1081,22 +1122,22 @@ static VFIOGroup *vfio_get_group(unsigned int groupid)
             return NULL;
         }
 
-        if (ioctl(group->fd, VFIO_GROUP_GET_FLAGS, &flags)) {
-            error_report("vfio: error getting group flags: %s\n",
+        if (ioctl(group->fd, VFIO_GROUP_GET_INFO, &info)) {
+            error_report("vfio: error getting group info: %s\n",
                          strerror(errno));
             close(group->fd);
             g_free(group);
             return NULL;
         }
 
-        if (!(flags & VFIO_GROUP_FLAGS_VIABLE)) {
+        if (!(info.flags & VFIO_GROUP_FLAGS_VIABLE)) {
             error_report("vfio: error, group %u is not viable, please ensure all devices within the iommu_group are bound to their vfio bus driver.\n", groupid);
             close(group->fd);
             g_free(group);
             return NULL;
         }
 
-        if (flags & VFIO_GROUP_FLAGS_MM_LOCKED) {
+        if (info.flags & VFIO_GROUP_FLAGS_MM_LOCKED) {
             error_report("vfio: error, group %u is already locked to another process.\n", groupid);
             close(group->fd);
             g_free(group);
@@ -1147,9 +1188,9 @@ static int __vfio_get_device(VFIOGroup *group,
 
 static int vfio_get_device(VFIOGroup *group, const char *name, VFIODevice *vdev)
 {
-    int ret, num_regions, num_irqs, i;
-    uint64_t device_flags;
-    struct vfio_region_info info;
+    struct vfio_device_info dev_info = { .argsz = sizeof(dev_info) };
+    struct vfio_region_info reg_info = { .argsz = sizeof(reg_info) };
+    int ret, i;
 
     ret = __vfio_get_device(group, name, vdev);
     if (ret) {
@@ -1157,53 +1198,40 @@ static int vfio_get_device(VFIOGroup *group, const char *name, VFIODevice *vdev)
     }
 
     /* Sanity check device */
-    ret = ioctl(vdev->fd, VFIO_DEVICE_GET_FLAGS, &device_flags);
+    ret = ioctl(vdev->fd, VFIO_DEVICE_GET_INFO, &dev_info);
     if (ret) {
-        error_report("vfio: error getting device flags: %s", strerror(errno));
+        error_report("vfio: error getting device info: %s", strerror(errno));
         goto error;
     }
 
-    DPRINTF("Device %s flags: %lx\n", name, device_flags);
+    DPRINTF("Device %s flags: %u, regions: %u, irgs: %u\n", name,
+            dev_info.flags, dev_info.num_regions, dev_info.num_irqs);
 
-    if (!(device_flags & VFIO_DEVICE_FLAGS_PCI)) {
+    if (!(dev_info.flags & VFIO_DEVICE_FLAGS_PCI)) {
         error_report("vfio: Um, this isn't a PCI device");
         goto error;
     }
 
-    vdev->reset_works = !!(device_flags & VFIO_DEVICE_FLAGS_RESET);
+    vdev->reset_works = !!(dev_info.flags & VFIO_DEVICE_FLAGS_RESET);
     if (!vdev->reset_works) {
         fprintf(stderr, "Warning, device %s does not support reset\n", name);
     }
 
-    ret = ioctl(vdev->fd, VFIO_DEVICE_GET_NUM_REGIONS, &num_regions);
-    if (ret || num_regions < VFIO_PCI_NUM_REGIONS) {
-        if (ret) {
-            error_report("vfio: error getting number of io regions: %s",
-                         strerror(errno));
-        } else {
-            error_report("vfio: unexpected number of io regions %d",
-                         num_regions);
-        }
+    if (dev_info.num_regions != VFIO_PCI_NUM_REGIONS) {
+        error_report("vfio: unexpected number of io regions %u",
+                     dev_info.num_regions);
         goto error;
     }
 
-    ret = ioctl(vdev->fd, VFIO_DEVICE_GET_NUM_IRQS, &num_irqs);
-    if (ret || num_irqs < VFIO_PCI_NUM_IRQS) {
-        if (ret) {
-            error_report("vfio: error getting number of irqs: %s",
-                         strerror(errno));
-        } else {
-            error_report("vfio: unexpected number of irqs %d", num_irqs);
-        }
+    if (dev_info.num_irqs != VFIO_PCI_NUM_IRQS) {
+        error_report("vfio: unexpected number of irqs %u", dev_info.num_irqs);
         goto error;
     }
 
     for (i = VFIO_PCI_BAR0_REGION_INDEX; i < VFIO_PCI_ROM_REGION_INDEX; i++) {
+        reg_info.index = i;
 
-        info.len = sizeof(info);
-        info.index = i;
-
-        ret = ioctl(vdev->fd, VFIO_DEVICE_GET_REGION_INFO, &info);
+        ret = ioctl(vdev->fd, VFIO_DEVICE_GET_REGION_INFO, &reg_info);
         if (ret) {
             error_report("vfio: Error getting region %d info: %s", i,
                          strerror(errno));
@@ -1212,17 +1240,16 @@ static int vfio_get_device(VFIOGroup *group, const char *name, VFIODevice *vdev)
 
         DPRINTF("Device %s region %d:\n", name, i);
         DPRINTF("  size: 0x%lx, offset: 0x%lx, flags: 0x%lx\n",
-                (unsigned long)info.size, (unsigned long)info.offset,
-                (unsigned long)info.flags);
+                (unsigned long)reg_info.size, (unsigned long)reg_info.offset,
+                (unsigned long)reg_info.flags);
 
-        vdev->resources[i].size = info.size;
-        vdev->resources[i].offset = info.offset;
+        vdev->resources[i].size = reg_info.size;
+        vdev->resources[i].offset = reg_info.offset;
     }
 
-    info.len = sizeof(info);
-    info.index = VFIO_PCI_ROM_REGION_INDEX;
+    reg_info.index = VFIO_PCI_ROM_REGION_INDEX;
 
-    ret = ioctl(vdev->fd, VFIO_DEVICE_GET_REGION_INFO, &info);
+    ret = ioctl(vdev->fd, VFIO_DEVICE_GET_REGION_INFO, &reg_info);
     if (ret) {
         error_report("vfio: Error getting ROM info: %s",
                      strerror(errno));
@@ -1231,16 +1258,15 @@ static int vfio_get_device(VFIOGroup *group, const char *name, VFIODevice *vdev)
 
     DPRINTF("Device %s ROM:\n", name);
     DPRINTF("  size: 0x%lx, offset: 0x%lx, flags: 0x%lx\n",
-            (unsigned long)info.size, (unsigned long)info.offset,
-            (unsigned long)info.flags);
+            (unsigned long)reg_info.size, (unsigned long)reg_info.offset,
+            (unsigned long)reg_info.flags);
 
-    vdev->rom_size = info.size;
-    vdev->rom_offset = info.offset;
+    vdev->rom_size = reg_info.size;
+    vdev->rom_offset = reg_info.offset;
 
-    info.len = sizeof(info);
-    info.index = VFIO_PCI_CONFIG_REGION_INDEX;
+    reg_info.index = VFIO_PCI_CONFIG_REGION_INDEX;
 
-    ret = ioctl(vdev->fd, VFIO_DEVICE_GET_REGION_INFO, &info);
+    ret = ioctl(vdev->fd, VFIO_DEVICE_GET_REGION_INFO, &reg_info);
     if (ret) {
         error_report("vfio: Error getting config info: %s",
                      strerror(errno));
@@ -1249,11 +1275,11 @@ static int vfio_get_device(VFIOGroup *group, const char *name, VFIODevice *vdev)
 
     DPRINTF("Device %s config:\n", name);
     DPRINTF("  size: 0x%lx, offset: 0x%lx, flags: 0x%lx\n",
-            (unsigned long)info.size, (unsigned long)info.offset,
-            (unsigned long)info.flags);
+            (unsigned long)reg_info.size, (unsigned long)reg_info.offset,
+            (unsigned long)reg_info.flags);
 
-    vdev->config_size = info.size;
-    vdev->config_offset = info.offset;
+    vdev->config_size = reg_info.size;
+    vdev->config_offset = reg_info.offset;
 
 error:
     if (ret) {
@@ -1273,7 +1299,7 @@ static void vfio_put_device(VFIODevice *vdev)
 
 static int vfio_group_new_iommu(VFIOGroup *group)
 {
-    uint64_t flags;
+    struct vfio_iommu_info info = { .argsz = sizeof(info) };
 
     group->iommu = g_malloc0(sizeof(*(group->iommu)));
     group->iommu->fd = ioctl(group->fd, VFIO_GROUP_GET_IOMMU_FD);
@@ -1283,15 +1309,18 @@ static int vfio_group_new_iommu(VFIOGroup *group)
             return -1;
     }
 
-    if (ioctl(group->iommu->fd, VFIO_IOMMU_GET_FLAGS, &flags)) {
+    if (ioctl(group->iommu->fd, VFIO_IOMMU_GET_INFO, &info)) {
         error_report("vfio: error getting iommu flags: %s", strerror(errno));
         close(group->iommu->fd);
         g_free(group->iommu);
         return -1;
     }
 
-    if (!(flags & VFIO_IOMMU_FLAGS_MAP_ANY)) {
-        error_report("vfio: iommu for group %u does not support MAP_ANY.",
+    /* XXX Eventually this may report the actual physical capabilities
+     * of the IOMMU instead of 0 - ~0. */
+    if (info.iova_min || info.iova_max != ~info.iova_min ||
+        !(info.pgsize_bitmap & TARGET_PAGE_SIZE)) {
+        error_report("vfio: iommu for group %u has unexpected properties\n",
                      group->groupid);
         close(group->iommu->fd);
         g_free(group->iommu);
@@ -1320,9 +1349,7 @@ static void vfio_group_put_iommu(VFIOGroup *group)
         cpu_unregister_phys_memory_client(&group->iommu->client);
         close(group->iommu->fd);
     } else {
-        VFIOGroup *mgroup = QLIST_FIRST(&group->iommu->group_list);
-
-        if (ioctl(mgroup->fd, VFIO_GROUP_UNMERGE, &group->fd) != 0) {
+        if (ioctl(group->fd, VFIO_GROUP_UNMERGE) != 0) {
             error_report("vfio: Failed ot unmerge group: %s (%d)",
                          strerror(errno), errno);
         }
