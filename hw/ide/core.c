@@ -25,6 +25,7 @@
 #include <hw/hw.h>
 #include <hw/pc.h>
 #include <hw/pci.h>
+#include <hw/isa.h>
 #include "qemu-error.h"
 #include "qemu-timer.h"
 #include "sysemu.h"
@@ -528,6 +529,7 @@ static int ide_handle_rw_error(IDEState *s, int error, int op)
         s->bus->error_status = op;
         bdrv_mon_event(s->bs, BDRV_ACTION_STOP, is_read);
         vm_stop(RUN_STATE_IO_ERROR);
+        bdrv_iostatus_set_err(s->bs, error);
     } else {
         if (op & BM_STATUS_DMA_RETRY) {
             dma_buf_commit(s, 0);
@@ -797,11 +799,23 @@ static void ide_cd_change_cb(void *opaque, bool load)
      * First indicate to the guest that a CD has been removed.  That's
      * done on the next command the guest sends us.
      *
-     * Then we set SENSE_UNIT_ATTENTION, by which the guest will
+     * Then we set UNIT_ATTENTION, by which the guest will
      * detect a new CD in the drive.  See ide_atapi_cmd() for details.
      */
     s->cdrom_changed = 1;
     s->events.new_media = true;
+    s->events.eject_request = false;
+    ide_set_irq(s->bus);
+}
+
+static void ide_cd_eject_request_cb(void *opaque, bool force)
+{
+    IDEState *s = opaque;
+
+    s->events.eject_request = true;
+    if (force) {
+        s->tray_locked = false;
+    }
     ide_set_irq(s->bus);
 }
 
@@ -1809,6 +1823,7 @@ static bool ide_cd_is_medium_locked(void *opaque)
 
 static const BlockDevOps ide_cd_block_ops = {
     .change_media_cb = ide_cd_change_cb,
+    .eject_request_cb = ide_cd_eject_request_cb,
     .is_tray_open = ide_cd_is_tray_open,
     .is_medium_locked = ide_cd_is_medium_locked,
 };
@@ -1872,6 +1887,7 @@ int ide_init_drive(IDEState *s, BlockDriverState *bs, IDEDriveKind kind,
     }
 
     ide_reset(s);
+    bdrv_iostatus_enable(bs);
     return 0;
 }
 
@@ -1969,20 +1985,27 @@ void ide_init2_with_non_qdev_drives(IDEBus *bus, DriveInfo *hd0,
     bus->dma = &ide_dma_nop;
 }
 
-void ide_init_ioport(IDEBus *bus, int iobase, int iobase2)
-{
-    register_ioport_write(iobase, 8, 1, ide_ioport_write, bus);
-    register_ioport_read(iobase, 8, 1, ide_ioport_read, bus);
-    if (iobase2) {
-        register_ioport_read(iobase2, 1, 1, ide_status_read, bus);
-        register_ioport_write(iobase2, 1, 1, ide_cmd_write, bus);
-    }
+static const MemoryRegionPortio ide_portio_list[] = {
+    { 0, 8, 1, .read = ide_ioport_read, .write = ide_ioport_write },
+    { 0, 2, 2, .read = ide_data_readw, .write = ide_data_writew },
+    { 0, 4, 4, .read = ide_data_readl, .write = ide_data_writel },
+    PORTIO_END_OF_LIST(),
+};
 
-    /* data ports */
-    register_ioport_write(iobase, 2, 2, ide_data_writew, bus);
-    register_ioport_read(iobase, 2, 2, ide_data_readw, bus);
-    register_ioport_write(iobase, 4, 4, ide_data_writel, bus);
-    register_ioport_read(iobase, 4, 4, ide_data_readl, bus);
+static const MemoryRegionPortio ide_portio2_list[] = {
+    { 0, 1, 1, .read = ide_status_read, .write = ide_cmd_write },
+    PORTIO_END_OF_LIST(),
+};
+
+void ide_init_ioport(IDEBus *bus, ISADevice *dev, int iobase, int iobase2)
+{
+    /* ??? Assume only ISA and PCI configurations, and that the PCI-ISA
+       bridge has been setup properly to always register with ISA.  */
+    isa_register_portio_list(dev, iobase, ide_portio_list, bus, "ide");
+
+    if (iobase2) {
+        isa_register_portio_list(dev, iobase2, ide_portio2_list, bus, "ide");
+    }
 }
 
 static bool is_identify_set(void *opaque, int version_id)
@@ -2017,7 +2040,7 @@ static int ide_drive_post_load(void *opaque, int version_id)
     IDEState *s = opaque;
 
     if (version_id < 3) {
-        if (s->sense_key == SENSE_UNIT_ATTENTION &&
+        if (s->sense_key == UNIT_ATTENTION &&
             s->asc == ASC_MEDIUM_MAY_HAVE_CHANGED) {
             s->cdrom_changed = 1;
         }
@@ -2029,7 +2052,7 @@ static int ide_drive_pio_post_load(void *opaque, int version_id)
 {
     IDEState *s = opaque;
 
-    if (s->end_transfer_fn_idx > ARRAY_SIZE(transfer_end_table)) {
+    if (s->end_transfer_fn_idx >= ARRAY_SIZE(transfer_end_table)) {
         return -EINVAL;
     }
     s->end_transfer_func = transfer_end_table[s->end_transfer_fn_idx];

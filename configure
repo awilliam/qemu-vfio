@@ -129,6 +129,7 @@ xen=""
 xen_ctrl_version=""
 linux_aio=""
 attr=""
+libattr=""
 xfs=""
 vfio_pci=""
 
@@ -139,6 +140,7 @@ debug_tcg="no"
 debug_mon="no"
 debug="no"
 strip_opt="yes"
+tcg_interpreter="no"
 bigendian="no"
 mingw32="no"
 EXESUF=""
@@ -170,8 +172,8 @@ mixemu="no"
 aix="no"
 blobs="yes"
 pkgversion=""
-check_utests="no"
-user_pie="no"
+check_utests=""
+pie=""
 zero_malloc=""
 trace_backend="nop"
 trace_file="trace"
@@ -183,6 +185,7 @@ usb_redir=""
 opengl=""
 zlib="yes"
 guest_agent="yes"
+libiscsi=""
 
 # parse CC options first
 for opt do
@@ -567,6 +570,14 @@ for opt do
   ;;
   --sysconfdir=*) sysconfdir="$optarg"
   ;;
+  --sbindir=*|--libexecdir=*|--sharedstatedir=*|--localstatedir=*|\
+  --oldincludedir=*|--datarootdir=*|--infodir=*|--localedir=*|\
+  --htmldir=*|--dvidir=*|--pdfdir=*|--psdir=*)
+    # These switches are silently ignored, for compatibility with
+    # autoconf-generated configure scripts. This allows QEMU's
+    # configure to be used by RPM and similar macros that set
+    # lots of directory switches by default.
+  ;;
   --disable-sdl) sdl="no"
   ;;
   --enable-sdl) sdl="yes"
@@ -654,9 +665,17 @@ for opt do
   ;;
   --enable-kvm) kvm="yes"
   ;;
+  --disable-tcg-interpreter) tcg_interpreter="no"
+  ;;
+  --enable-tcg-interpreter) tcg_interpreter="yes"
+  ;;
   --disable-spice) spice="no"
   ;;
   --enable-spice) spice="yes"
+  ;;
+  --disable-libiscsi) libiscsi="no"
+  ;;
+  --enable-libiscsi) libiscsi="yes"
   ;;
   --enable-profiler) profiler="yes"
   ;;
@@ -691,9 +710,9 @@ for opt do
   ;;
   --disable-guest-base) guest_base="no"
   ;;
-  --enable-user-pie) user_pie="yes"
+  --enable-pie) pie="yes"
   ;;
-  --disable-user-pie) user_pie="no"
+  --disable-pie) pie="no"
   ;;
   --enable-uname-release=*) uname_release="$optarg"
   ;;
@@ -748,8 +767,6 @@ for opt do
   --disable-opengl) opengl="no"
   ;;
   --enable-opengl) opengl="yes"
-  ;;
-  --*dir)
   ;;
   --disable-rbd) rbd="no"
   ;;
@@ -1009,6 +1026,7 @@ echo "  --enable-bluez           enable bluez stack connectivity"
 echo "  --disable-slirp          disable SLIRP userspace network connectivity"
 echo "  --disable-kvm            disable KVM acceleration support"
 echo "  --enable-kvm             enable KVM acceleration support"
+echo "  --enable-tcg-interpreter enable TCG with bytecode interpreter (TCI)"
 echo "  --disable-nptl           disable usermode NPTL support"
 echo "  --enable-nptl            enable usermode NPTL support"
 echo "  --enable-system          enable all system emulation targets"
@@ -1024,12 +1042,13 @@ echo "  --disable-bsd-user       disable all BSD usermode emulation targets"
 echo "  --enable-guest-base      enable GUEST_BASE support for usermode"
 echo "                           emulation targets"
 echo "  --disable-guest-base     disable GUEST_BASE support"
-echo "  --enable-user-pie        build usermode emulation targets as PIE"
-echo "  --disable-user-pie       do not build usermode emulation targets as PIE"
+echo "  --enable-pie             build Position Independent Executables"
+echo "  --disable-pie            do not build Position Independent Executables"
 echo "  --fmod-lib               path to FMOD library"
 echo "  --fmod-inc               path to FMOD includes"
 echo "  --oss-lib                path to OSS library"
 echo "  --enable-uname-release=R Return R for uname -r in usermode emulation"
+echo "  --cpu=CPU                Build for host CPU [$cpu]"
 echo "  --sparc_cpu=V            Build qemu for Sparc architecture v7, v8, v8plus, v8plusa, v9"
 echo "  --disable-uuid           disable uuid support"
 echo "  --enable-uuid            enable uuid support"
@@ -1051,6 +1070,8 @@ echo "                           Default:trace-<pid>"
 echo "  --disable-spice          disable spice"
 echo "  --enable-spice           enable spice"
 echo "  --enable-rbd             enable building the rados block device (rbd)"
+echo "  --disable-libiscsi       disable iscsi support"
+echo "  --enable-libiscsi        enable iscsi support"
 echo "  --disable-smartcard      disable smartcard support"
 echo "  --enable-smartcard       enable smartcard support"
 echo "  --disable-smartcard-nss  disable smartcard nss support"
@@ -1090,6 +1111,57 @@ for flag in $gcc_flags; do
 	QEMU_CFLAGS="$QEMU_CFLAGS $flag"
     fi
 done
+
+if test "$static" = "yes" ; then
+  if test "$pie" = "yes" ; then
+    echo "static and pie are mutually incompatible"
+    exit 1
+  else
+    pie="no"
+  fi
+fi
+
+if test "$pie" = ""; then
+  case "$cpu-$targetos" in
+    i386-Linux|x86_64-Linux)
+      ;;
+    *)
+      pie="no"
+      ;;
+  esac
+fi
+
+if test "$pie" != "no" ; then
+  cat > $TMPC << EOF
+
+#ifdef __linux__
+#  define THREAD __thread
+#else
+#  define THREAD
+#endif
+
+static THREAD int tls_var;
+
+int main(void) { return tls_var; }
+
+EOF
+  if compile_prog "-fPIE -DPIE" "-pie"; then
+    QEMU_CFLAGS="-fPIE -DPIE $QEMU_CFLAGS"
+    LDFLAGS="-pie $LDFLAGS"
+    pie="yes"
+    if compile_prog "" "-Wl,-z,relro -Wl,-z,now" ; then
+      LDFLAGS="-Wl,-z,relro -Wl,-z,now $LDFLAGS"
+    fi
+  else
+    if test "$pie" = "yes"; then
+      echo "PIE not available due to missing toolchain support"
+      exit 1
+    else
+      echo "Disabling PIE due to missing toolchain support"
+      pie="no"
+    fi
+  fi
+fi
 
 #
 # Solaris specific configure tool chain decisions
@@ -1828,7 +1900,7 @@ if test "$check_utests" != "no" ; then
 #include <check.h>
 int main(void) { suite_create("qemu test"); return 0; }
 EOF
-  check_libs=`$pkg_config --libs check`
+  check_libs=`$pkg_config --libs check 2>/dev/null`
   if compile_prog "" $check_libs ; then
     check_utests=yes
     libs_tools="$check_libs $libs_tools"
@@ -1976,12 +2048,20 @@ if test "$attr" != "no" ; then
   cat > $TMPC <<EOF
 #include <stdio.h>
 #include <sys/types.h>
+#ifdef CONFIG_LIBATTR
 #include <attr/xattr.h>
+#else
+#include <sys/xattr.h>
+#endif
 int main(void) { getxattr(NULL, NULL, NULL, 0); setxattr(NULL, NULL, NULL, 0, 0); return 0; }
 EOF
-  if compile_prog "" "-lattr" ; then
+  if compile_prog "" "" ; then
+    attr=yes
+  # Older distros have <attr/xattr.h>, and need -lattr:
+  elif compile_prog "-DCONFIG_LIBATTR" "-lattr" ; then
     attr=yes
     LIBS="-lattr $LIBS"
+    libattr=yes
   else
     if test "$attr" = "yes" ; then
       feature_not_found "ATTR"
@@ -2205,7 +2285,7 @@ cat > $TMPC << EOF
 
 int main(void)
 {
-    int efd = eventfd(0, 0);
+    int efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     return 0;
 }
 EOF
@@ -2361,6 +2441,25 @@ EOF
 if compile_prog "" "" ; then
   bswap_h=yes
 fi
+
+##########################################
+# Do we have libiscsi
+if test "$libiscsi" != "no" ; then
+  cat > $TMPC << EOF
+#include <iscsi/iscsi.h>
+int main(void) { iscsi_create_context(""); return 0; }
+EOF
+  if compile_prog "-Werror" "-liscsi" ; then
+    libiscsi="yes"
+    LIBS="$LIBS -liscsi"
+  else
+    if test "$libiscsi" = "yes" ; then
+      feature_not_found "libiscsi"
+    fi
+    libiscsi="no"
+  fi
+fi
+
 
 ##########################################
 # Do we need librt
@@ -2585,6 +2684,31 @@ EOF
 fi
 
 ##########################################
+# check if we have open_by_handle_at
+
+open_by_hande_at=no
+cat > $TMPC << EOF
+#include <fcntl.h>
+int main(void) { struct file_handle fh; open_by_handle_at(0, &fh, 0); }
+EOF
+if compile_prog "" "" ; then
+    open_by_handle_at=yes
+fi
+
+########################################
+# check if we have linux/magic.h
+
+linux_magic_h=no
+cat > $TMPC << EOF
+#include <linux/magic.h>
+int main(void) {
+}
+EOF
+if compile_prog "" "" ; then
+    linux_magic_h=yes
+fi
+
+##########################################
 # End of CC checks
 # After here, no more $cc or $ld runs
 
@@ -2645,8 +2769,8 @@ if test "$softmmu" = yes ; then
       tools="qemu-ga\$(EXESUF) $tools"
     fi
     if [ "$check_utests" = "yes" ]; then
-      tools="check-qint check-qstring check-qdict check-qlist $tools"
-      tools="check-qfloat check-qjson $tools"
+      checks="check-qint check-qstring check-qdict check-qlist"
+      checks="check-qfloat check-qjson test-coroutine $checks"
     fi
   fi
 fi
@@ -2726,12 +2850,13 @@ echo "Documentation     $docs"
 echo "uname -r          $uname_release"
 echo "NPTL support      $nptl"
 echo "GUEST_BASE        $guest_base"
-echo "PIE user targets  $user_pie"
+echo "PIE               $pie"
 echo "vde support       $vde"
 echo "Linux AIO support $linux_aio"
 echo "ATTR/XATTR support $attr"
 echo "Install blobs     $blobs"
 echo "KVM support       $kvm"
+echo "TCG interpreter   $tcg_interpreter"
 echo "fdt support       $fdt"
 echo "preadv support    $preadv"
 echo "fdatasync         $fdatasync"
@@ -2747,6 +2872,7 @@ echo "xfsctl support    $xfs"
 echo "nss used          $smartcard_nss"
 echo "usb net redir     $usb_redir"
 echo "OpenGL support    $opengl"
+echo "libiscsi support  $libiscsi"
 echo "build guest agent $guest_agent"
 echo "VFIO PCI support  $vfio_pci"
 
@@ -2779,6 +2905,15 @@ case "$cpu" in
   ;;
   armv4b|armv4l)
     ARCH=arm
+  ;;
+  *)
+    if test "$tcg_interpreter" = "yes" ; then
+        echo "Unsupported CPU = $cpu, will use TCG with TCI (experimental)"
+        ARCH=tci
+    else
+        echo "Unsupported CPU = $cpu, try --enable-tcg-interpreter"
+        exit 1
+    fi
   ;;
 esac
 echo "ARCH=$ARCH" >> $config_host_mak
@@ -2993,6 +3128,9 @@ fi
 if test "$attr" = "yes" ; then
   echo "CONFIG_ATTR=y" >> $config_host_mak
 fi
+if test "$libattr" = "yes" ; then
+  echo "CONFIG_LIBATTR=y" >> $config_host_mak
+fi
 if test "$linux" = "yes" ; then
   if test "$attr" = "yes" ; then
     echo "CONFIG_VIRTFS=y" >> $config_host_mak
@@ -3012,6 +3150,9 @@ if test "$fdt" = "yes" ; then
 fi
 if test "$signalfd" = "yes" ; then
   echo "CONFIG_SIGNALFD=y" >> $config_host_mak
+fi
+if test "$tcg_interpreter" = "yes" ; then
+  echo "CONFIG_TCG_INTERPRETER=y" >> $config_host_mak
 fi
 if test "$need_offsetof" = "yes" ; then
   echo "CONFIG_NEED_OFFSETOF=y" >> $config_host_mak
@@ -3046,6 +3187,10 @@ if test "$opengl" = "yes" ; then
   echo "CONFIG_OPENGL=y" >> $config_host_mak
 fi
 
+if test "$libiscsi" = "yes" ; then
+  echo "CONFIG_LIBISCSI=y" >> $config_host_mak
+fi
+
 # XXX: suppress that
 if [ "$bsd" = "yes" ] ; then
   echo "CONFIG_BSD=y" >> $config_host_mak
@@ -3062,6 +3207,14 @@ fi
 
 if test "$ucontext_coroutine" = "yes" ; then
   echo "CONFIG_UCONTEXT_COROUTINE=y" >> $config_host_mak
+fi
+
+if test "$open_by_handle_at" = "yes" ; then
+  echo "CONFIG_OPEN_BY_HANDLE=y" >> $config_host_mak
+fi
+
+if test "$linux_magic_h" = "yes" ; then
+  echo "CONFIG_LINUX_MAGIC_H=y" >> $config_host_mak
 fi
 
 # USB host support
@@ -3108,6 +3261,7 @@ if test "$trace_default" = "yes"; then
 fi
 
 echo "TOOLS=$tools" >> $config_host_mak
+echo "CHECKS=$checks" >> $config_host_mak
 echo "ROMS=$roms" >> $config_host_mak
 echo "MAKE=$make" >> $config_host_mak
 echo "INSTALL=$install" >> $config_host_mak
@@ -3157,9 +3311,6 @@ for d in libdis libdis-user; do
     symlink $source_path/Makefile.dis $d/Makefile
     echo > $d/config.mak
 done
-if test "$static" = "no" -a "$user_pie" = "yes" ; then
-  echo "QEMU_CFLAGS+=-fpie" > libdis-user/config.mak
-fi
 
 for target in $target_list; do
 target_dir="$target"
@@ -3305,7 +3456,7 @@ case "$target_arch2" in
   ;;
   ppc)
     gdb_xml_files="power-core.xml power-fpu.xml power-altivec.xml power-spe.xml"
-    target_phys_bits=32
+    target_phys_bits=64
     target_nptl="yes"
     target_libs_softmmu="$fdt_libs"
   ;;
@@ -3479,7 +3630,9 @@ cflags=""
 includes=""
 ldflags=""
 
-if test "$ARCH" = "sparc64" ; then
+if test "$tcg_interpreter" = "yes"; then
+  includes="-I\$(SRC_PATH)/tcg/tci $includes"
+elif test "$ARCH" = "sparc64" ; then
   includes="-I\$(SRC_PATH)/tcg/sparc $includes"
 elif test "$ARCH" = "s390x" ; then
   includes="-I\$(SRC_PATH)/tcg/s390 $includes"
@@ -3556,6 +3709,10 @@ for i in $ARCH $TARGET_BASE_ARCH ; do
   ;;
   esac
 done
+if test "$tcg_interpreter" = "yes" ; then
+  echo "CONFIG_TCI_DIS=y"  >> $config_target_mak
+  echo "CONFIG_TCI_DIS=y"  >> $libdis_config_mak
+fi
 
 case "$ARCH" in
 alpha)
@@ -3578,12 +3735,6 @@ if test "$target_softmmu" = "yes" ; then
   esac
 fi
 
-if test "$target_user_only" = "yes" -a "$static" = "no" -a \
-	"$user_pie" = "yes" ; then
-  cflags="-fpie $cflags"
-  ldflags="-pie $ldflags"
-fi
-
 if test "$target_softmmu" = "yes" -a \( \
         "$TARGET_ARCH" = "microblaze" -o \
         "$TARGET_ARCH" = "cris" \) ; then
@@ -3602,7 +3753,12 @@ if test "$gprof" = "yes" ; then
   fi
 fi
 
-linker_script="-Wl,-T../config-host.ld -Wl,-T,\$(SRC_PATH)/\$(ARCH).ld"
+if test "$ARCH" = "tci"; then
+  linker_script=""
+else
+  linker_script="-Wl,-T../config-host.ld -Wl,-T,\$(SRC_PATH)/\$(ARCH).ld"
+fi
+
 if test "$target_linux_user" = "yes" -o "$target_bsd_user" = "yes" ; then
   case "$ARCH" in
   sparc)
@@ -3702,9 +3858,6 @@ d=libuser
 mkdir -p $d
 mkdir -p $d/trace
 symlink $source_path/Makefile.user $d/Makefile
-if test "$static" = "no" -a "$user_pie" = "yes" ; then
-  echo "QEMU_CFLAGS+=-fpie" > $d/config.mak
-fi
 
 if test "$docs" = "yes" ; then
   mkdir -p QMP

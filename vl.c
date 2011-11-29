@@ -143,11 +143,12 @@ int main(int argc, char **argv)
 #include "audio/audio.h"
 #include "migration.h"
 #include "kvm.h"
+#include "qjson.h"
 #include "qemu-option.h"
 #include "qemu-config.h"
-#include "qemu-objects.h"
 #include "qemu-options.h"
 #include "qmp-commands.h"
+#include "main-loop.h"
 #ifdef CONFIG_VIRTFS
 #include "fsdev/qemu-fsdev.h"
 #endif
@@ -248,8 +249,6 @@ int nb_numa_nodes;
 uint64_t node_mem[MAX_NODES];
 uint64_t node_cpumask[MAX_NODES];
 
-static QEMUTimer *nographic_timer;
-
 uint8_t qemu_uuid[16];
 
 static QEMUBootSetHandler *boot_set_handler;
@@ -339,16 +338,20 @@ static const RunStateTransition runstate_transitions_def[] = {
     { RUN_STATE_INMIGRATE, RUN_STATE_PRELAUNCH },
 
     { RUN_STATE_INTERNAL_ERROR, RUN_STATE_PAUSED },
+    { RUN_STATE_INTERNAL_ERROR, RUN_STATE_FINISH_MIGRATE },
 
     { RUN_STATE_IO_ERROR, RUN_STATE_RUNNING },
+    { RUN_STATE_IO_ERROR, RUN_STATE_FINISH_MIGRATE },
 
     { RUN_STATE_PAUSED, RUN_STATE_RUNNING },
+    { RUN_STATE_PAUSED, RUN_STATE_FINISH_MIGRATE },
 
     { RUN_STATE_POSTMIGRATE, RUN_STATE_RUNNING },
+    { RUN_STATE_POSTMIGRATE, RUN_STATE_FINISH_MIGRATE },
 
     { RUN_STATE_PRELAUNCH, RUN_STATE_RUNNING },
+    { RUN_STATE_PRELAUNCH, RUN_STATE_FINISH_MIGRATE },
     { RUN_STATE_PRELAUNCH, RUN_STATE_INMIGRATE },
-    { RUN_STATE_PRELAUNCH, RUN_STATE_POSTMIGRATE },
 
     { RUN_STATE_FINISH_MIGRATE, RUN_STATE_RUNNING },
     { RUN_STATE_FINISH_MIGRATE, RUN_STATE_POSTMIGRATE },
@@ -368,8 +371,10 @@ static const RunStateTransition runstate_transitions_def[] = {
     { RUN_STATE_SAVE_VM, RUN_STATE_RUNNING },
 
     { RUN_STATE_SHUTDOWN, RUN_STATE_PAUSED },
+    { RUN_STATE_SHUTDOWN, RUN_STATE_FINISH_MIGRATE },
 
     { RUN_STATE_WATCHDOG, RUN_STATE_RUNNING },
+    { RUN_STATE_WATCHDOG, RUN_STATE_FINISH_MIGRATE },
 
     { RUN_STATE_MAX, RUN_STATE_MAX },
 };
@@ -395,9 +400,12 @@ void runstate_init(void)
 /* This function will abort() on invalid state transitions */
 void runstate_set(RunState new_state)
 {
-    if (new_state >= RUN_STATE_MAX ||
-        !runstate_valid_transitions[current_run_state][new_state]) {
-        fprintf(stderr, "invalid runstate transition\n");
+    assert(new_state < RUN_STATE_MAX);
+
+    if (!runstate_valid_transitions[current_run_state][new_state]) {
+        fprintf(stderr, "ERROR: invalid runstate transition: '%s' -> '%s'\n",
+                RunState_lookup[current_run_state],
+                RunState_lookup[new_state]);
         abort();
     }
 
@@ -452,8 +460,11 @@ int qemu_timedate_diff(struct tm *tm)
     if (rtc_date_offset == -1)
         if (rtc_utc)
             seconds = mktimegm(tm);
-        else
-            seconds = mktime(tm);
+        else {
+            struct tm tmp = *tm;
+            tmp.tm_isdst = -1; /* use timezone to figure it out */
+            seconds = mktime(&tmp);
+	}
     else
         seconds = mktimegm(tm) + rtc_date_offset;
 
@@ -904,8 +915,8 @@ char *get_boot_devices_list(uint32_t *size)
         } else if (devpath) {
             bootpath = devpath;
         } else {
+            assert(i->suffix);
             bootpath = g_strdup(i->suffix);
-            assert(bootpath);
         }
 
         if (total) {
@@ -942,8 +953,8 @@ static void numa_add(const char *optarg)
             node_mem[nodenr] = 0;
         } else {
             int64_t sval;
-            sval = strtosz(option, NULL);
-            if (sval < 0) {
+            sval = strtosz(option, &endptr);
+            if (sval < 0 || *endptr) {
                 fprintf(stderr, "qemu: invalid numa mem size: %s\n", optarg);
                 exit(1);
             }
@@ -1196,7 +1207,6 @@ static void gui_update(void *opaque)
     DisplayState *ds = opaque;
     DisplayChangeListener *dcl = ds->listeners;
 
-    qemu_flush_coalesced_mmio_buffer();
     dpy_refresh(ds);
 
     while (dcl != NULL) {
@@ -1206,14 +1216,6 @@ static void gui_update(void *opaque)
         dcl = dcl->next;
     }
     qemu_mod_timer(ds->gui_timer, interval + qemu_get_clock_ms(rt_clock));
-}
-
-static void nographic_update(void *opaque)
-{
-    uint64_t interval = GUI_REFRESH_INTERVAL;
-
-    qemu_flush_coalesced_mmio_buffer();
-    qemu_mod_timer(nographic_timer, interval + qemu_get_clock_ms(rt_clock));
 }
 
 struct vm_change_state_entry {
@@ -1427,142 +1429,51 @@ void qemu_system_vmstop_request(RunState state)
     qemu_notify_event();
 }
 
-static GPollFD poll_fds[1024 * 2]; /* this is probably overkill */
-static int n_poll_fds;
-static int max_priority;
-
-static void glib_select_fill(int *max_fd, fd_set *rfds, fd_set *wfds,
-                             fd_set *xfds, struct timeval *tv)
-{
-    GMainContext *context = g_main_context_default();
-    int i;
-    int timeout = 0, cur_timeout;
-
-    g_main_context_prepare(context, &max_priority);
-
-    n_poll_fds = g_main_context_query(context, max_priority, &timeout,
-                                      poll_fds, ARRAY_SIZE(poll_fds));
-    g_assert(n_poll_fds <= ARRAY_SIZE(poll_fds));
-
-    for (i = 0; i < n_poll_fds; i++) {
-        GPollFD *p = &poll_fds[i];
-
-        if ((p->events & G_IO_IN)) {
-            FD_SET(p->fd, rfds);
-            *max_fd = MAX(*max_fd, p->fd);
-        }
-        if ((p->events & G_IO_OUT)) {
-            FD_SET(p->fd, wfds);
-            *max_fd = MAX(*max_fd, p->fd);
-        }
-        if ((p->events & G_IO_ERR)) {
-            FD_SET(p->fd, xfds);
-            *max_fd = MAX(*max_fd, p->fd);
-        }
-    }
-
-    cur_timeout = (tv->tv_sec * 1000) + ((tv->tv_usec + 500) / 1000);
-    if (timeout >= 0 && timeout < cur_timeout) {
-        tv->tv_sec = timeout / 1000;
-        tv->tv_usec = (timeout % 1000) * 1000;
-    }
-}
-
-static void glib_select_poll(fd_set *rfds, fd_set *wfds, fd_set *xfds,
-                             bool err)
-{
-    GMainContext *context = g_main_context_default();
-
-    if (!err) {
-        int i;
-
-        for (i = 0; i < n_poll_fds; i++) {
-            GPollFD *p = &poll_fds[i];
-
-            if ((p->events & G_IO_IN) && FD_ISSET(p->fd, rfds)) {
-                p->revents |= G_IO_IN;
-            }
-            if ((p->events & G_IO_OUT) && FD_ISSET(p->fd, wfds)) {
-                p->revents |= G_IO_OUT;
-            }
-            if ((p->events & G_IO_ERR) && FD_ISSET(p->fd, xfds)) {
-                p->revents |= G_IO_ERR;
-            }
-        }
-    }
-
-    if (g_main_context_check(context, max_priority, poll_fds, n_poll_fds)) {
-        g_main_context_dispatch(context);
-    }
-}
-
-int main_loop_wait(int nonblocking)
-{
-    fd_set rfds, wfds, xfds;
-    int ret, nfds;
-    struct timeval tv;
-    int timeout;
-
-    if (nonblocking)
-        timeout = 0;
-    else {
-        timeout = qemu_calculate_timeout();
-        qemu_bh_update_timeout(&timeout);
-    }
-
-    os_host_main_loop_wait(&timeout);
-
-    tv.tv_sec = timeout / 1000;
-    tv.tv_usec = (timeout % 1000) * 1000;
-
-    /* poll any events */
-    /* XXX: separate device handlers from system ones */
-    nfds = -1;
-    FD_ZERO(&rfds);
-    FD_ZERO(&wfds);
-    FD_ZERO(&xfds);
-
-    qemu_iohandler_fill(&nfds, &rfds, &wfds, &xfds);
-    slirp_select_fill(&nfds, &rfds, &wfds, &xfds);
-    glib_select_fill(&nfds, &rfds, &wfds, &xfds, &tv);
-
-    if (timeout > 0) {
-        qemu_mutex_unlock_iothread();
-    }
-
-    ret = select(nfds + 1, &rfds, &wfds, &xfds, &tv);
-
-    if (timeout > 0) {
-        qemu_mutex_lock_iothread();
-    }
-
-    qemu_iohandler_poll(&rfds, &wfds, &xfds, ret);
-    slirp_select_poll(&rfds, &wfds, &xfds, (ret < 0));
-    glib_select_poll(&rfds, &wfds, &xfds, (ret < 0));
-
-    qemu_run_all_timers();
-
-    /* Check bottom-halves last in case any of the earlier events triggered
-       them.  */
-    qemu_bh_poll();
-
-    return ret;
-}
-
 qemu_irq qemu_system_powerdown;
+
+static bool main_loop_should_exit(void)
+{
+    RunState r;
+    if (qemu_debug_requested()) {
+        vm_stop(RUN_STATE_DEBUG);
+    }
+    if (qemu_shutdown_requested()) {
+        qemu_kill_report();
+        monitor_protocol_event(QEVENT_SHUTDOWN, NULL);
+        if (no_shutdown) {
+            vm_stop(RUN_STATE_SHUTDOWN);
+        } else {
+            return true;
+        }
+    }
+    if (qemu_reset_requested()) {
+        pause_all_vcpus();
+        cpu_synchronize_all_states();
+        qemu_system_reset(VMRESET_REPORT);
+        resume_all_vcpus();
+        if (runstate_check(RUN_STATE_INTERNAL_ERROR) ||
+            runstate_check(RUN_STATE_SHUTDOWN)) {
+            runstate_set(RUN_STATE_PAUSED);
+        }
+    }
+    if (qemu_powerdown_requested()) {
+        monitor_protocol_event(QEVENT_POWERDOWN, NULL);
+        qemu_irq_raise(qemu_system_powerdown);
+    }
+    if (qemu_vmstop_requested(&r)) {
+        vm_stop(r);
+    }
+    return false;
+}
 
 static void main_loop(void)
 {
     bool nonblocking;
-    int last_io __attribute__ ((unused)) = 0;
+    int last_io = 0;
 #ifdef CONFIG_PROFILER
     int64_t ti;
 #endif
-    RunState r;
-
-    qemu_main_loop_start();
-
-    for (;;) {
+    do {
         nonblocking = !kvm_enabled() && last_io > 0;
 #ifdef CONFIG_PROFILER
         ti = profile_getclock();
@@ -1571,38 +1482,7 @@ static void main_loop(void)
 #ifdef CONFIG_PROFILER
         dev_time += profile_getclock() - ti;
 #endif
-
-        if (qemu_debug_requested()) {
-            vm_stop(RUN_STATE_DEBUG);
-        }
-        if (qemu_shutdown_requested()) {
-            qemu_kill_report();
-            monitor_protocol_event(QEVENT_SHUTDOWN, NULL);
-            if (no_shutdown) {
-                vm_stop(RUN_STATE_SHUTDOWN);
-            } else
-                break;
-        }
-        if (qemu_reset_requested()) {
-            pause_all_vcpus();
-            cpu_synchronize_all_states();
-            qemu_system_reset(VMRESET_REPORT);
-            resume_all_vcpus();
-            if (runstate_check(RUN_STATE_INTERNAL_ERROR) ||
-                runstate_check(RUN_STATE_SHUTDOWN)) {
-                runstate_set(RUN_STATE_PAUSED);
-            }
-        }
-        if (qemu_powerdown_requested()) {
-            monitor_protocol_event(QEVENT_POWERDOWN, NULL);
-            qemu_irq_raise(qemu_system_powerdown);
-        }
-        if (qemu_vmstop_requested(&r)) {
-            vm_stop(r);
-        }
-    }
-    bdrv_close_all();
-    pause_all_vcpus();
+    } while (!main_loop_should_exit());
 }
 
 static void version(void)
@@ -2308,11 +2188,14 @@ int main(int argc, char **argv, char **envp)
     error_set_progname(argv[0]);
 
     g_mem_set_vtable(&mem_trace);
-    g_thread_init(NULL);
+    if (!g_thread_supported()) {
+        g_thread_init(NULL);
+    }
 
     runstate_init();
 
     init_clocks();
+    rtc_clock = host_clock;
 
     qemu_cache_utils_init(envp);
 
@@ -2652,9 +2535,10 @@ int main(int argc, char **argv, char **envp)
                 break;
             case QEMU_OPTION_m: {
                 int64_t value;
+                char *end;
 
-                value = strtosz(optarg, NULL);
-                if (value < 0) {
+                value = strtosz(optarg, &end);
+                if (value < 0 || *end) {
                     fprintf(stderr, "qemu: invalid ram size: %s\n", optarg);
                     exit(1);
                 }
@@ -2785,6 +2669,7 @@ int main(int argc, char **argv, char **envp)
             case QEMU_OPTION_virtfs: {
                 QemuOpts *fsdev;
                 QemuOpts *device;
+                const char *writeout;
 
                 olist = qemu_find_opts("virtfs");
                 if (!olist) {
@@ -2797,16 +2682,14 @@ int main(int argc, char **argv, char **envp)
                     exit(1);
                 }
 
-                if (qemu_opt_get(opts, "fstype") == NULL ||
+                if (qemu_opt_get(opts, "fsdriver") == NULL ||
                         qemu_opt_get(opts, "mount_tag") == NULL ||
-                        qemu_opt_get(opts, "path") == NULL ||
-                        qemu_opt_get(opts, "security_model") == NULL) {
-                    fprintf(stderr, "Usage: -virtfs fstype,path=/share_path/,"
-                            "security_model=[mapped|passthrough|none],"
+                        qemu_opt_get(opts, "path") == NULL) {
+                    fprintf(stderr, "Usage: -virtfs fsdriver,path=/share_path/,"
+                            "[security_model={mapped|passthrough|none}],"
                             "mount_tag=tag.\n");
                     exit(1);
                 }
-
                 fsdev = qemu_opts_create(qemu_find_opts("fsdev"),
                                          qemu_opt_get(opts, "mount_tag"), 1);
                 if (!fsdev) {
@@ -2814,17 +2697,48 @@ int main(int argc, char **argv, char **envp)
                             qemu_opt_get(opts, "mount_tag"));
                     exit(1);
                 }
-                qemu_opt_set(fsdev, "fstype", qemu_opt_get(opts, "fstype"));
+
+                writeout = qemu_opt_get(opts, "writeout");
+                if (writeout) {
+#ifdef CONFIG_SYNC_FILE_RANGE
+                    qemu_opt_set(fsdev, "writeout", writeout);
+#else
+                    fprintf(stderr, "writeout=immediate not supported on "
+                            "this platform\n");
+                    exit(1);
+#endif
+                }
+                qemu_opt_set(fsdev, "fsdriver", qemu_opt_get(opts, "fsdriver"));
                 qemu_opt_set(fsdev, "path", qemu_opt_get(opts, "path"));
                 qemu_opt_set(fsdev, "security_model",
                              qemu_opt_get(opts, "security_model"));
 
+                qemu_opt_set_bool(fsdev, "readonly",
+                                qemu_opt_get_bool(opts, "readonly", 0));
                 device = qemu_opts_create(qemu_find_opts("device"), NULL, 0);
                 qemu_opt_set(device, "driver", "virtio-9p-pci");
                 qemu_opt_set(device, "fsdev",
                              qemu_opt_get(opts, "mount_tag"));
                 qemu_opt_set(device, "mount_tag",
                              qemu_opt_get(opts, "mount_tag"));
+                break;
+            }
+            case QEMU_OPTION_virtfs_synth: {
+                QemuOpts *fsdev;
+                QemuOpts *device;
+
+                fsdev = qemu_opts_create(qemu_find_opts("fsdev"), "v_synth", 1);
+                if (!fsdev) {
+                    fprintf(stderr, "duplicate option: %s\n", "virtfs_synth");
+                    exit(1);
+                }
+                qemu_opt_set(fsdev, "fsdriver", "synth");
+                qemu_opt_set(fsdev, "path", "/"); /* ignored */
+
+                device = qemu_opts_create(qemu_find_opts("device"), NULL, 0);
+                qemu_opt_set(device, "driver", "virtio-9p-pci");
+                qemu_opt_set(device, "fsdev", "v_synth");
+                qemu_opt_set(device, "mount_tag", "v_synth");
                 break;
             }
             case QEMU_OPTION_serial:
@@ -3176,6 +3090,11 @@ int main(int argc, char **argv, char **envp)
         data_dir = CONFIG_QEMU_DATADIR;
     }
 
+    if (machine == NULL) {
+        fprintf(stderr, "No machine found.\n");
+        exit(1);
+    }
+
     /*
      * Default to max_cpus = smp_cpus, in case the user doesn't
      * specify a max_cpus value.
@@ -3290,6 +3209,7 @@ int main(int argc, char **argv, char **envp)
 
     configure_accelerator();
 
+    qemu_init_cpu_loop();
     if (qemu_init_main_loop()) {
         fprintf(stderr, "qemu_init_main_loop failed\n");
         exit(1);
@@ -3310,6 +3230,11 @@ int main(int argc, char **argv, char **envp)
 
     if (init_timer_alarm() < 0) {
         fprintf(stderr, "could not initialize alarm timer\n");
+        exit(1);
+    }
+
+    if (icount_option && (kvm_enabled() || xen_enabled())) {
+        fprintf(stderr, "-icount is not allowed with kvm or xen\n");
         exit(1);
     }
     configure_icount(icount_option);
@@ -3515,10 +3440,6 @@ int main(int argc, char **argv, char **envp)
         }
         dcl = dcl->next;
     }
-    if (ds->gui_timer == NULL) {
-        nographic_timer = qemu_new_timer_ms(rt_clock, nographic_update, NULL);
-        qemu_mod_timer(nographic_timer, qemu_get_clock_ms(rt_clock));
-    }
     text_consoles_set_display(ds);
 
     if (gdbstub_dev && gdbserver_start(gdbstub_dev) < 0) {
@@ -3560,8 +3481,10 @@ int main(int argc, char **argv, char **envp)
 
     os_setup_post();
 
+    resume_all_vcpus();
     main_loop();
-    quit_timers();
+    bdrv_close_all();
+    pause_all_vcpus();
     net_cleanup();
     res_free();
 

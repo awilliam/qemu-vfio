@@ -331,10 +331,7 @@ EQMP
     {
         .name       = "cpu",
         .args_type  = "index:i",
-        .params     = "index",
-        .help       = "set the default CPU",
-        .user_print = monitor_user_noop,
-        .mhandler.cmd_new = do_cpu_set,
+        .mhandler.cmd_new = qmp_marshal_input_cpu,
     },
 
 SQMP
@@ -569,7 +566,8 @@ EQMP
         .params     = "protocol hostname port tls-port cert-subject",
         .help       = "send migration info to spice/vnc client",
         .user_print = monitor_user_noop,
-        .mhandler.cmd_new = client_migrate_info,
+        .mhandler.cmd_async = client_migrate_info,
+        .flags      = MONITOR_CMD_ASYNC,
     },
 
 SQMP
@@ -710,10 +708,10 @@ Arguments:
 
 Example:
 
--> { "execute": "blockdev-snapshot", "arguments": { "device": "ide-hd0",
-                                                    "snapshot-file":
-                                                    "/some/place/my-image",
-                                                    "format": "qcow2" } }
+-> { "execute": "blockdev-snapshot-sync", "arguments": { "device": "ide-hd0",
+                                                         "snapshot-file":
+                                                        "/some/place/my-image",
+                                                        "format": "qcow2" } }
 <- { "return": {} }
 
 EQMP
@@ -1154,6 +1152,10 @@ Each json-object contain the following:
                                 "tftp", "vdi", "vmdk", "vpc", "vvfat"
          - "backing_file": backing file name (json-string, optional)
          - "encrypted": true if encrypted, false otherwise (json-bool)
+- "io-status": I/O operation status, only present if the device supports it
+               and the VM is configured to stop on errors. It's always reset
+               to "ok" when the "cont" command is issued (json_string, optional)
+             - Possible values: "ok", "failed", "nospace"
 
 Example:
 
@@ -1161,6 +1163,7 @@ Example:
 <- {
       "return":[
          {
+            "io-status": "ok",
             "device":"ide0-hd0",
             "locked":false,
             "removable":false,
@@ -1173,6 +1176,7 @@ Example:
             "type":"unknown"
          },
          {
+            "io-status": "ok",
             "device":"ide1-cd0",
             "locked":false,
             "removable":true,
@@ -1194,6 +1198,12 @@ Example:
    }
 
 EQMP
+
+    {
+        .name       = "query-block",
+        .args_type  = "",
+        .mhandler.cmd_new = qmp_marshal_input_query_block,
+    },
 
 SQMP
 query-blockstats
@@ -1302,6 +1312,12 @@ Example:
 
 EQMP
 
+    {
+        .name       = "query-blockstats",
+        .args_type  = "",
+        .mhandler.cmd_new = qmp_marshal_input_query_blockstats,
+    },
+
 SQMP
 query-cpus
 ----------
@@ -1343,6 +1359,12 @@ Example:
    }
 
 EQMP
+
+    {
+        .name       = "query-cpus",
+        .args_type  = "",
+        .mhandler.cmd_new = qmp_marshal_input_query_cpus,
+    },
 
 SQMP
 query-pci
@@ -1555,6 +1577,12 @@ Note: This example has been shortened as the real response is too long.
 
 EQMP
 
+    {
+        .name       = "query-pci",
+        .args_type  = "",
+        .mhandler.cmd_new = qmp_marshal_input_query_pci,
+    },
+
 SQMP
 query-kvm
 ---------
@@ -1657,6 +1685,12 @@ Example:
 
 EQMP
 
+    {
+        .name       = "query-mice",
+        .args_type  = "",
+        .mhandler.cmd_new = qmp_marshal_input_query_mice,
+    },
+
 SQMP
 query-vnc
 ---------
@@ -1713,6 +1747,12 @@ Example:
    }
 
 EQMP
+
+    {
+        .name       = "query-vnc",
+        .args_type  = "",
+        .mhandler.cmd_new = qmp_marshal_input_query_vnc,
+    },
 
 SQMP
 query-spice
@@ -1783,6 +1823,14 @@ Example:
    }
 
 EQMP
+
+#if defined(CONFIG_SPICE)
+    {
+        .name       = "query-spice",
+        .args_type  = "",
+        .mhandler.cmd_new = qmp_marshal_input_query_spice,
+    },
+#endif
 
 SQMP
 query-name
@@ -1907,6 +1955,12 @@ Examples:
 
 EQMP
 
+    {
+        .name       = "query-migrate",
+        .args_type  = "",
+        .mhandler.cmd_new = qmp_marshal_input_query_migrate,
+    },
+
 SQMP
 query-balloon
 -------------
@@ -1942,3 +1996,8 @@ Example:
 
 EQMP
 
+    {
+        .name       = "query-balloon",
+        .args_type  = "",
+        .mhandler.cmd_new = qmp_marshal_input_query_balloon,
+    },

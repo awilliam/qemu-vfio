@@ -175,7 +175,7 @@ typedef enum TCGType {
 
 typedef tcg_target_ulong TCGArg;
 
-/* Define a type and accessor macros for varables.  Using a struct is
+/* Define a type and accessor macros for variables.  Using a struct is
    nice because it gives some level of type safely.  Ideally the compiler
    be able to see through all this.  However in practice this is not true,
    expecially on targets with braindamaged ABIs (e.g. i386).
@@ -525,7 +525,8 @@ typedef struct TCGOpDef {
 } TCGOpDef;
 
 extern TCGOpDef tcg_op_defs[];
-        
+extern const size_t tcg_op_defs_max;
+
 typedef struct TCGTargetOpDef {
     TCGOpcode op;
     const char *args_ct_str[TCG_MAX_OP_ARGS];
@@ -584,10 +585,9 @@ TCGv_i32 tcg_const_local_i32(int32_t val);
 TCGv_i64 tcg_const_local_i64(int64_t val);
 
 extern uint8_t code_gen_prologue[];
-#if defined(_ARCH_PPC) && !defined(_ARCH_PPC64)
-#define tcg_qemu_tb_exec(env, tb_ptr)                                    \
-    ((long REGPARM __attribute__ ((longcall)) (*)(void *, void *))code_gen_prologue)(env, tb_ptr)
-#else
-#define tcg_qemu_tb_exec(env, tb_ptr)                                    \
+
+/* TCG targets may use a different definition of tcg_qemu_tb_exec. */
+#if !defined(tcg_qemu_tb_exec)
+# define tcg_qemu_tb_exec(env, tb_ptr) \
     ((long REGPARM (*)(void *, void *))code_gen_prologue)(env, tb_ptr)
 #endif

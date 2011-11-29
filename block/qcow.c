@@ -26,6 +26,7 @@
 #include "module.h"
 #include <zlib.h>
 #include "aes.h"
+#include "migration.h"
 
 /**************************************************************/
 /* QEMU COW block driver with compression and encryption support */
@@ -74,6 +75,7 @@ typedef struct BDRVQcowState {
     AES_KEY aes_encrypt_key;
     AES_KEY aes_decrypt_key;
     CoMutex lock;
+    Error *migration_blocker;
 } BDRVQcowState;
 
 static int decompress_cluster(BlockDriverState *bs, uint64_t cluster_offset);
@@ -159,6 +161,12 @@ static int qcow_open(BlockDriverState *bs, int flags)
             goto fail;
         bs->backing_file[len] = '\0';
     }
+
+    /* Disable migration when qcow images are used */
+    error_set(&s->migration_blocker,
+              QERR_BLOCK_FORMAT_FEATURE_NOT_SUPPORTED,
+              "qcow", bs->device_name, "live migration");
+    migrate_add_blocker(s->migration_blocker);
 
     qemu_co_mutex_init(&s->lock);
     return 0;
@@ -596,7 +604,7 @@ static int qcow_co_writev(BlockDriverState *bs, int64_t sector_num,
     if (qiov->niov > 1) {
         qemu_vfree(orig_buf);
     }
-    free(cluster_data);
+    g_free(cluster_data);
 
     return ret;
 }
@@ -604,10 +612,14 @@ static int qcow_co_writev(BlockDriverState *bs, int64_t sector_num,
 static void qcow_close(BlockDriverState *bs)
 {
     BDRVQcowState *s = bs->opaque;
+
     g_free(s->l1_table);
     g_free(s->l2_cache);
     g_free(s->cluster_cache);
     g_free(s->cluster_data);
+
+    migrate_del_blocker(s->migration_blocker);
+    error_free(s->migration_blocker);
 }
 
 static int qcow_create(const char *filename, QEMUOptionParameter *options)
@@ -736,8 +748,6 @@ static int qcow_write_compressed(BlockDriverState *bs, int64_t sector_num,
         return -EINVAL;
 
     out_buf = g_malloc(s->cluster_size + (s->cluster_size / 1000) + 128);
-    if (!out_buf)
-        return -1;
 
     /* best compression, small window, no zlib header */
     memset(&strm, 0, sizeof(strm));
@@ -745,8 +755,8 @@ static int qcow_write_compressed(BlockDriverState *bs, int64_t sector_num,
                        Z_DEFLATED, -12,
                        9, Z_DEFAULT_STRATEGY);
     if (ret != 0) {
-        g_free(out_buf);
-        return -1;
+        ret = -EINVAL;
+        goto fail;
     }
 
     strm.avail_in = s->cluster_size;
@@ -756,9 +766,9 @@ static int qcow_write_compressed(BlockDriverState *bs, int64_t sector_num,
 
     ret = deflate(&strm, Z_FINISH);
     if (ret != Z_STREAM_END && ret != Z_OK) {
-        g_free(out_buf);
         deflateEnd(&strm);
-        return -1;
+        ret = -EINVAL;
+        goto fail;
     }
     out_len = strm.next_out - out_buf;
 
@@ -766,30 +776,34 @@ static int qcow_write_compressed(BlockDriverState *bs, int64_t sector_num,
 
     if (ret != Z_STREAM_END || out_len >= s->cluster_size) {
         /* could not compress: write normal cluster */
-        bdrv_write(bs, sector_num, buf, s->cluster_sectors);
+        ret = bdrv_write(bs, sector_num, buf, s->cluster_sectors);
+        if (ret < 0) {
+            goto fail;
+        }
     } else {
         cluster_offset = get_cluster_offset(bs, sector_num << 9, 2,
                                             out_len, 0, 0);
+        if (cluster_offset == 0) {
+            ret = -EIO;
+            goto fail;
+        }
+
         cluster_offset &= s->cluster_offset_mask;
-        if (bdrv_pwrite(bs->file, cluster_offset, out_buf, out_len) != out_len) {
-            g_free(out_buf);
-            return -1;
+        ret = bdrv_pwrite(bs->file, cluster_offset, out_buf, out_len);
+        if (ret < 0) {
+            goto fail;
         }
     }
 
+    ret = 0;
+fail:
     g_free(out_buf);
-    return 0;
+    return ret;
 }
 
-static int qcow_flush(BlockDriverState *bs)
+static coroutine_fn int qcow_co_flush(BlockDriverState *bs)
 {
-    return bdrv_flush(bs->file);
-}
-
-static BlockDriverAIOCB *qcow_aio_flush(BlockDriverState *bs,
-        BlockDriverCompletionFunc *cb, void *opaque)
-{
-    return bdrv_aio_flush(bs->file, cb, opaque);
+    return bdrv_co_flush(bs->file);
 }
 
 static int qcow_get_info(BlockDriverState *bs, BlockDriverInfo *bdi)
@@ -826,15 +840,16 @@ static BlockDriver bdrv_qcow = {
     .bdrv_open		= qcow_open,
     .bdrv_close		= qcow_close,
     .bdrv_create	= qcow_create,
-    .bdrv_flush		= qcow_flush,
-    .bdrv_is_allocated	= qcow_is_allocated,
-    .bdrv_set_key	= qcow_set_key,
-    .bdrv_make_empty	= qcow_make_empty,
-    .bdrv_co_readv  = qcow_co_readv,
-    .bdrv_co_writev = qcow_co_writev,
-    .bdrv_aio_flush	= qcow_aio_flush,
-    .bdrv_write_compressed = qcow_write_compressed,
-    .bdrv_get_info	= qcow_get_info,
+
+    .bdrv_co_readv          = qcow_co_readv,
+    .bdrv_co_writev         = qcow_co_writev,
+    .bdrv_co_flush_to_disk  = qcow_co_flush,
+    .bdrv_is_allocated      = qcow_is_allocated,
+
+    .bdrv_set_key           = qcow_set_key,
+    .bdrv_make_empty        = qcow_make_empty,
+    .bdrv_write_compressed  = qcow_write_compressed,
+    .bdrv_get_info          = qcow_get_info,
 
     .create_options = qcow_create_options,
 };

@@ -23,23 +23,6 @@
 #define SM_LOCAL_MODE_BITS    0600
 #define SM_LOCAL_DIR_MODE_BITS    0700
 
-typedef enum
-{
-    /*
-     * Server will try to set uid/gid.
-     * On failure ignore the error.
-     */
-    SM_NONE = 0,
-    /*
-     * uid/gid set on fileserver files
-     */
-    SM_PASSTHROUGH = 1,
-    /*
-     * uid/gid part of xattr
-     */
-    SM_MAPPED,
-} SecModel;
-
 typedef struct FsCred
 {
     uid_t   fc_uid;
@@ -49,17 +32,43 @@ typedef struct FsCred
 } FsCred;
 
 struct xattr_operations;
+struct FsContext;
+struct V9fsPath;
 
-/* FsContext flag values */
-#define PATHNAME_FSCONTEXT 0x1
+typedef struct extended_ops {
+    int (*get_st_gen)(struct FsContext *, struct V9fsPath *,
+                      mode_t, uint64_t *);
+} extended_ops;
+
+/* export flags */
+#define V9FS_IMMEDIATE_WRITEOUT     0x00000001
+#define V9FS_PATHNAME_FSCONTEXT     0x00000002
+/*
+ * uid/gid set on fileserver files
+ */
+#define V9FS_SM_PASSTHROUGH         0x00000004
+/*
+ * uid/gid part of xattr
+ */
+#define V9FS_SM_MAPPED              0x00000008
+/*
+ * Server will try to set uid/gid.
+ * On failure ignore the error.
+ */
+#define V9FS_SM_NONE                0x00000010
+#define V9FS_RDONLY                 0x00000020
+
+#define V9FS_SEC_MASK               0x0000001C
+
+
 
 typedef struct FsContext
 {
-    int flags;
-    char *fs_root;
-    SecModel fs_sm;
     uid_t uid;
+    char *fs_root;
+    int export_flags;
     struct xattr_operations **xops;
+    struct extended_ops exops;
     /* fs driver specific data */
     void *private;
 } FsContext;
@@ -68,6 +77,8 @@ typedef struct V9fsPath {
     int16_t size;
     char *data;
 } V9fsPath;
+
+typedef union V9fsFidOpenState V9fsFidOpenState;
 
 void cred_init(FsCred *);
 
@@ -85,22 +96,26 @@ typedef struct FileOperations
                    const char *, FsCred *);
     int (*link)(FsContext *, V9fsPath *, V9fsPath *, const char *);
     int (*setuid)(FsContext *, uid_t);
-    int (*close)(FsContext *, int);
-    int (*closedir)(FsContext *, DIR *);
-    DIR *(*opendir)(FsContext *, V9fsPath *);
-    int (*open)(FsContext *, V9fsPath *, int);
-    int (*open2)(FsContext *, V9fsPath *, const char *, int, FsCred *);
-    void (*rewinddir)(FsContext *, DIR *);
-    off_t (*telldir)(FsContext *, DIR *);
-    int (*readdir_r)(FsContext *, DIR *, struct dirent *, struct dirent **);
-    void (*seekdir)(FsContext *, DIR *, off_t);
-    ssize_t (*preadv)(FsContext *, int, const struct iovec *, int, off_t);
-    ssize_t (*pwritev)(FsContext *, int, const struct iovec *, int, off_t);
+    int (*close)(FsContext *, V9fsFidOpenState *);
+    int (*closedir)(FsContext *, V9fsFidOpenState *);
+    int (*opendir)(FsContext *, V9fsPath *, V9fsFidOpenState *);
+    int (*open)(FsContext *, V9fsPath *, int, V9fsFidOpenState *);
+    int (*open2)(FsContext *, V9fsPath *, const char *,
+                 int, FsCred *, V9fsFidOpenState *);
+    void (*rewinddir)(FsContext *, V9fsFidOpenState *);
+    off_t (*telldir)(FsContext *, V9fsFidOpenState *);
+    int (*readdir_r)(FsContext *, V9fsFidOpenState *,
+                     struct dirent *, struct dirent **);
+    void (*seekdir)(FsContext *, V9fsFidOpenState *, off_t);
+    ssize_t (*preadv)(FsContext *, V9fsFidOpenState *,
+                      const struct iovec *, int, off_t);
+    ssize_t (*pwritev)(FsContext *, V9fsFidOpenState *,
+                       const struct iovec *, int, off_t);
     int (*mkdir)(FsContext *, V9fsPath *, const char *, FsCred *);
-    int (*fstat)(FsContext *, int, struct stat *);
+    int (*fstat)(FsContext *, V9fsFidOpenState *, struct stat *);
     int (*rename)(FsContext *, const char *, const char *);
     int (*truncate)(FsContext *, V9fsPath *, off_t);
-    int (*fsync)(FsContext *, int, int);
+    int (*fsync)(FsContext *, V9fsFidOpenState *, int);
     int (*statfs)(FsContext *s, V9fsPath *path, struct statfs *stbuf);
     ssize_t (*lgetxattr)(FsContext *, V9fsPath *,
                          const char *, void *, size_t);

@@ -110,6 +110,7 @@ For system emulation, the following hardware targets are supported:
 @item Syborg SVP base model (ARM Cortex-A8).
 @item AXIS-Devboard88 (CRISv32 ETRAX-FS).
 @item Petalogix Spartan 3aDSP1800 MMU ref design (MicroBlaze).
+@item Avnet LX60/LX110/LX200 boards (Xtensa)
 @end itemize
 
 @cindex supported user mode targets
@@ -226,7 +227,7 @@ QEMU uses YM3812 emulation by Tatsuyuki Satoh.
 QEMU uses GUS emulation (GUSEMU32 @url{http://www.deinmeister.de/gusemu/})
 by Tibor "TS" Schütz.
 
-Not that, by default, GUS shares IRQ(7) with parallel ports and so
+Note that, by default, GUS shares IRQ(7) with parallel ports and so
 qemu must be told to not have parallel ports to have working GUS
 
 @example
@@ -420,6 +421,7 @@ snapshots.
 * disk_images_fat_images::    Virtual FAT disk images
 * disk_images_nbd::           NBD access
 * disk_images_sheepdog::      Sheepdog disk images
+* disk_images_iscsi::         iSCSI LUNs
 @end menu
 
 @node disk_images_quickstart
@@ -693,6 +695,61 @@ specify one of the Sheepdog servers to connect to.
 qemu-img create sheepdog:@var{hostname}:@var{port}:@var{image} @var{size}
 qemu sheepdog:@var{hostname}:@var{port}:@var{image}
 @end example
+
+@node disk_images_iscsi
+@subsection iSCSI LUNs
+
+iSCSI is a popular protocol used to access SCSI devices across a computer
+network.
+
+There are two different ways iSCSI devices can be used by QEMU.
+
+The first method is to mount the iSCSI LUN on the host, and make it appear as
+any other ordinary SCSI device on the host and then to access this device as a
+/dev/sd device from QEMU. How to do this differs between host OSes.
+
+The second method involves using the iSCSI initiator that is built into
+QEMU. This provides a mechanism that works the same way regardless of which
+host OS you are running QEMU on. This section will describe this second method
+of using iSCSI together with QEMU.
+
+In QEMU, iSCSI devices are described using special iSCSI URLs
+
+@example
+URL syntax:
+iscsi://[<username>[%<password>]@@]<host>[:<port>]/<target-iqn-name>/<lun>
+@end example
+
+Username and password are optional and only used if your target is set up
+using CHAP authentication for access control.
+Alternatively the username and password can also be set via environment
+variables to have these not show up in the process list
+
+@example
+export LIBISCSI_CHAP_USERNAME=<username>
+export LIBISCSI_CHAP_PASSWORD=<password>
+iscsi://<host>/<target-iqn-name>/<lun>
+@end example
+
+Howto set up a simple iSCSI target on loopback and accessing it via QEMU:
+@example
+This example shows how to set up an iSCSI target with one CDROM and one DISK
+using the Linux STGT software target. This target is available on Red Hat based
+systems as the package 'scsi-target-utils'.
+
+tgtd --iscsi portal=127.0.0.1:3260
+tgtadm --lld iscsi --op new --mode target --tid 1 -T iqn.qemu.test
+tgtadm --lld iscsi --mode logicalunit --op new --tid 1 --lun 1 \
+    -b /IMAGES/disk.img --device-type=disk
+tgtadm --lld iscsi --mode logicalunit --op new --tid 1 --lun 2 \
+    -b /IMAGES/cd.iso --device-type=cd
+tgtadm --lld iscsi --op bind --mode target --tid 1 -I ALL
+
+qemu-system-i386 -boot d -drive file=iscsi://127.0.0.1/iqn.qemu.test/1 \
+    -cdrom iscsi://127.0.0.1/iqn.qemu.test/2
+@end example
+
+
 
 @node pcsys_network
 @section Network emulation
@@ -1446,6 +1503,7 @@ differences are mentioned in the following sections.
 * Cris System emulator::
 * Microblaze System emulator::
 * SH4 System emulator::
+* Xtensa System emulator::
 @end menu
 
 @node PowerPC System emulator
@@ -1747,7 +1805,7 @@ PC Keyboard
 IDE controller
 @end itemize
 
-The mipssim pseudo board emulation provides an environment similiar
+The mipssim pseudo board emulation provides an environment similar
 to what the proprietary MIPS emulator uses for running Linux.
 It supports:
 
@@ -2124,6 +2182,59 @@ TODO
 
 TODO
 
+@node Xtensa System emulator
+@section Xtensa System emulator
+@cindex system emulation (Xtensa)
+
+Two executables cover simulation of both Xtensa endian options,
+@file{qemu-system-xtensa} and @file{qemu-system-xtensaeb}.
+Two different machine types are emulated:
+
+@itemize @minus
+@item
+Xtensa emulator pseudo board "sim"
+@item
+Avnet LX60/LX110/LX200 board
+@end itemize
+
+The sim pseudo board emulation provides an environment similar
+to one provided by the proprietary Tensilica ISS.
+It supports:
+
+@itemize @minus
+@item
+A range of Xtensa CPUs, default is the DC232B
+@item
+Console and filesystem access via semihosting calls
+@end itemize
+
+The Avnet LX60/LX110/LX200 emulation supports:
+
+@itemize @minus
+@item
+A range of Xtensa CPUs, default is the DC232B
+@item
+16550 UART
+@item
+OpenCores 10/100 Mbps Ethernet MAC
+@end itemize
+
+@c man begin OPTIONS
+
+The following options are specific to the Xtensa emulation:
+
+@table @option
+
+@item -semihosting
+Enable semihosting syscall emulation.
+
+Xtensa semihosting provides basic file IO calls, such as open/read/write/seek/select.
+Tensilica baremetal libc for ISS and linux platform "sim" use this interface.
+
+Note that this allows guest direct access to the host filesystem,
+so should only be used with trusted guest OS.
+
+@end table
 @node QEMU User space emulator
 @chapter QEMU User space emulator
 

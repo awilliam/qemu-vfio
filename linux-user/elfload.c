@@ -618,8 +618,8 @@ static inline void init_thread(struct target_pt_regs *_regs, struct image_info *
 {
     _regs->gpr[1] = infop->start_stack;
 #if defined(TARGET_PPC64) && !defined(TARGET_ABI32)
-    _regs->gpr[2] = ldq_raw(infop->entry + 8) + infop->load_addr;
-    infop->entry = ldq_raw(infop->entry) + infop->load_addr;
+    _regs->gpr[2] = ldq_raw(infop->entry + 8) + infop->load_bias;
+    infop->entry = ldq_raw(infop->entry) + infop->load_bias;
 #endif
     _regs->nip = infop->entry;
 }
@@ -1105,8 +1105,7 @@ static abi_ulong copy_elf_strings(int argc,char ** argv, void **page,
                 offset = p % TARGET_PAGE_SIZE;
                 pag = (char *)page[p/TARGET_PAGE_SIZE];
                 if (!pag) {
-                    pag = (char *)malloc(TARGET_PAGE_SIZE);
-                    memset(pag, 0, TARGET_PAGE_SIZE);
+                    pag = g_try_malloc0(TARGET_PAGE_SIZE);
                     page[p/TARGET_PAGE_SIZE] = pag;
                     if (!pag)
                         return 0;
@@ -1164,7 +1163,7 @@ static abi_ulong setup_arg_pages(abi_ulong p, struct linux_binprm *bprm,
             info->rss++;
             /* FIXME - check return value of memcpy_to_target() for failure */
             memcpy_to_target(stack_base, bprm->page[i], TARGET_PAGE_SIZE);
-            free(bprm->page[i]);
+            g_free(bprm->page[i]);
         }
         stack_base += TARGET_PAGE_SIZE;
     }
@@ -1884,11 +1883,11 @@ int load_elf_binary(struct linux_binprm * bprm, struct target_pt_regs * regs,
     info->start_stack = bprm->p;
 
     /* If we have an interpreter, set that as the program's entry point.
-       Copy the load_addr as well, to help PPC64 interpret the entry
+       Copy the load_bias as well, to help PPC64 interpret the entry
        point as a function descriptor.  Do this after creating elf tables
        so that we copy the original program entry point into the AUXV.  */
     if (elf_interpreter) {
-        info->load_addr = interp_info.load_addr;
+        info->load_bias = interp_info.load_bias;
         info->entry = interp_info.entry;
         free(elf_interpreter);
     }

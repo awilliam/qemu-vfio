@@ -16,6 +16,7 @@
 #include "trace.h"
 #include "blockdev.h"
 #include "virtio-blk.h"
+#include "scsi-defs.h"
 #ifdef __linux__
 # include <scsi/sg.h>
 #endif
@@ -78,6 +79,7 @@ static int virtio_blk_handle_rw_error(VirtIOBlockReq *req, int error,
         s->rq = req;
         bdrv_mon_event(s->bs, BDRV_ACTION_STOP, is_read);
         vm_stop(RUN_STATE_IO_ERROR);
+        bdrv_iostatus_set_err(s->bs, error);
     } else {
         virtio_blk_req_complete(req, VIRTIO_BLK_S_IOERR);
         bdrv_acct_done(s->bs, &req->acct);
@@ -230,7 +232,20 @@ static void virtio_blk_handle_scsi(VirtIOBlockReq *req)
         status = VIRTIO_BLK_S_OK;
     }
 
-    stl_p(&req->scsi->errors, hdr.status);
+    /*
+     * From SCSI-Generic-HOWTO: "Some lower level drivers (e.g. ide-scsi)
+     * clear the masked_status field [hence status gets cleared too, see
+     * block/scsi_ioctl.c] even when a CHECK_CONDITION or COMMAND_TERMINATED
+     * status has occurred.  However they do set DRIVER_SENSE in driver_status
+     * field. Also a (sb_len_wr > 0) indicates there is a sense buffer.
+     */
+    if (hdr.status == 0 && hdr.sb_len_wr > 0) {
+        hdr.status = CHECK_CONDITION;
+    }
+
+    stl_p(&req->scsi->errors,
+          hdr.status | (hdr.msg_status << 8) |
+          (hdr.host_status << 16) | (hdr.driver_status << 24));
     stl_p(&req->scsi->residual, hdr.resid);
     stl_p(&req->scsi->sense_len, hdr.sb_len_wr);
     stl_p(&req->scsi->data_len, hdr.dxfer_len);
@@ -470,6 +485,7 @@ static void virtio_blk_update_config(VirtIODevice *vdev, uint8_t *config)
     struct virtio_blk_config blkcfg;
     uint64_t capacity;
     int cylinders, heads, secs;
+    int blk_size = s->conf->logical_block_size;
 
     bdrv_get_geometry(s->bs, &capacity);
     bdrv_get_geometry_hint(s->bs, &cylinders, &heads, &secs);
@@ -477,14 +493,14 @@ static void virtio_blk_update_config(VirtIODevice *vdev, uint8_t *config)
     stq_raw(&blkcfg.capacity, capacity);
     stl_raw(&blkcfg.seg_max, 128 - 2);
     stw_raw(&blkcfg.cylinders, cylinders);
+    stl_raw(&blkcfg.blk_size, blk_size);
+    stw_raw(&blkcfg.min_io_size, s->conf->min_io_size / blk_size);
+    stw_raw(&blkcfg.opt_io_size, s->conf->opt_io_size / blk_size);
     blkcfg.heads = heads;
     blkcfg.sectors = secs & ~s->sector_mask;
-    blkcfg.blk_size = s->conf->logical_block_size;
     blkcfg.size_max = 0;
     blkcfg.physical_block_exp = get_physical_block_exp(s->conf);
     blkcfg.alignment_offset = 0;
-    blkcfg.min_io_size = s->conf->min_io_size / blkcfg.blk_size;
-    blkcfg.opt_io_size = s->conf->opt_io_size / blkcfg.blk_size;
     memcpy(config, &blkcfg, sizeof(struct virtio_blk_config));
 }
 
@@ -603,6 +619,7 @@ VirtIODevice *virtio_blk_init(DeviceState *dev, BlockConf *conf,
     bdrv_set_dev_ops(s->bs, &virtio_block_ops, s);
     bdrv_set_buffer_alignment(s->bs, conf->logical_block_size);
 
+    bdrv_iostatus_enable(s->bs);
     add_boot_device_path(conf->bootindex, dev, "/disk@0,0");
 
     return &s->vdev;

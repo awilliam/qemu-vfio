@@ -16,8 +16,16 @@
  * You should have received a copy of the GNU Lesser General Public
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
+
+#ifndef HW_IOAPIC_H
+#define HW_IOAPIC_H
+
 #include "notify.h"
+
+#define IOAPIC_NUM_PINS 24
 
 void ioapic_eoi_broadcast(int vector);
 void ioapic_add_gsi_eoi_notifier(Notifier *notify, uint32_t gsi);
 void ioapic_remove_gsi_eoi_notifier(Notifier *notify, uint32_t gsi);
+
+#endif /* !HW_IOAPIC_H */

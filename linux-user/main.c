@@ -1148,7 +1148,7 @@ void cpu_loop (CPUSPARCState *env)
         case TT_TFAULT:
         case TT_DFAULT:
             {
-                info.si_signo = SIGSEGV;
+                info.si_signo = TARGET_SIGSEGV;
                 info.si_errno = 0;
                 /* XXX: check env->error_code */
                 info.si_code = TARGET_SEGV_MAPERR;
@@ -1166,7 +1166,7 @@ void cpu_loop (CPUSPARCState *env)
         case TT_TFAULT:
         case TT_DFAULT:
             {
-                info.si_signo = SIGSEGV;
+                info.si_signo = TARGET_SIGSEGV;
                 info.si_errno = 0;
                 /* XXX: check env->error_code */
                 info.si_code = TARGET_SEGV_MAPERR;
@@ -1190,6 +1190,15 @@ void cpu_loop (CPUSPARCState *env)
 #endif
         case EXCP_INTERRUPT:
             /* just indicate that signals should be handled asap */
+            break;
+        case TT_ILL_INSN:
+            {
+                info.si_signo = TARGET_SIGILL;
+                info.si_errno = 0;
+                info.si_code = TARGET_ILL_ILLOPC;
+                info._sifields._sigfault._addr = env->pc;
+                queue_signal(env, info.si_signo, &info);
+            }
             break;
         case EXCP_DEBUG:
             {
@@ -1332,7 +1341,7 @@ void cpu_loop(CPUPPCState *env)
 {
     target_siginfo_t info;
     int trapnr;
-    uint32_t ret;
+    target_ulong ret;
 
     for(;;) {
         cpu_exec_start(env);
@@ -1695,27 +1704,20 @@ void cpu_loop(CPUPPCState *env)
              * PPC ABI uses overflow flag in cr0 to signal an error
              * in syscalls.
              */
-#if 0
-            printf("syscall %d 0x%08x 0x%08x 0x%08x 0x%08x\n", env->gpr[0],
-                   env->gpr[3], env->gpr[4], env->gpr[5], env->gpr[6]);
-#endif
             env->crf[0] &= ~0x1;
             ret = do_syscall(env, env->gpr[0], env->gpr[3], env->gpr[4],
                              env->gpr[5], env->gpr[6], env->gpr[7],
                              env->gpr[8], 0, 0);
-            if (ret == (uint32_t)(-TARGET_QEMU_ESIGRETURN)) {
+            if (ret == (target_ulong)(-TARGET_QEMU_ESIGRETURN)) {
                 /* Returning from a successful sigreturn syscall.
                    Avoid corrupting register state.  */
                 break;
             }
-            if (ret > (uint32_t)(-515)) {
+            if (ret > (target_ulong)(-515)) {
                 env->crf[0] |= 0x1;
                 ret = -ret;
             }
             env->gpr[3] = ret;
-#if 0
-            printf("syscall returned 0x%08x (%d)\n", ret, ret);
-#endif
             break;
         case POWERPC_EXCP_STCX:
             if (do_store_exclusive(env)) {
@@ -3084,6 +3086,7 @@ static void handle_arg_version(const char *arg)
 {
     printf("qemu-" TARGET_ARCH " version " QEMU_VERSION QEMU_PKGVERSION
            ", Copyright (c) 2003-2008 Fabrice Bellard\n");
+    exit(0);
 }
 
 struct qemu_argument {
@@ -3129,7 +3132,7 @@ struct qemu_argument arg_table[] = {
     {"strace",     "QEMU_STRACE",      false, handle_arg_strace,
      "",           "log system calls"},
     {"version",    "QEMU_VERSION",     false, handle_arg_version,
-     "",           "log system calls"},
+     "",           "display version information and exit"},
     {NULL, NULL, false, NULL, NULL, NULL}
 };
 
@@ -3231,16 +3234,15 @@ static int parse_args(int argc, char **argv)
 
         for (arginfo = arg_table; arginfo->handle_opt != NULL; arginfo++) {
             if (!strcmp(r, arginfo->argv)) {
-                if (optind >= argc) {
-                    usage();
-                }
-
-                arginfo->handle_opt(argv[optind]);
-
                 if (arginfo->has_arg) {
+                    if (optind >= argc) {
+                        usage();
+                    }
+                    arginfo->handle_opt(argv[optind]);
                     optind++;
+                } else {
+                    arginfo->handle_opt(NULL);
                 }
-
                 break;
             }
         }
@@ -3275,9 +3277,6 @@ int main(int argc, char **argv, char **envp)
     int target_argc;
     int i;
     int ret;
-
-    if (argc <= 1)
-        usage();
 
     qemu_cache_utils_init(envp);
 

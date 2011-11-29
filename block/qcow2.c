@@ -240,6 +240,7 @@ static int qcow2_open(BlockDriverState *bs, int flags)
     s->cluster_data = qemu_blockalign(bs, QCOW_MAX_CRYPT_CLUSTERS * s->cluster_size
                                   + 512);
     s->cluster_cache_offset = -1;
+    s->flags = flags;
 
     ret = qcow2_refcount_init(bs);
     if (ret != 0) {
@@ -632,6 +633,37 @@ static void qcow2_close(BlockDriverState *bs)
     qcow2_refcount_close(bs);
 }
 
+static void qcow2_invalidate_cache(BlockDriverState *bs)
+{
+    BDRVQcowState *s = bs->opaque;
+    int flags = s->flags;
+    AES_KEY aes_encrypt_key;
+    AES_KEY aes_decrypt_key;
+    uint32_t crypt_method = 0;
+
+    /*
+     * Backing files are read-only which makes all of their metadata immutable,
+     * that means we don't have to worry about reopening them here.
+     */
+
+    if (s->crypt_method) {
+        crypt_method = s->crypt_method;
+        memcpy(&aes_encrypt_key, &s->aes_encrypt_key, sizeof(aes_encrypt_key));
+        memcpy(&aes_decrypt_key, &s->aes_decrypt_key, sizeof(aes_decrypt_key));
+    }
+
+    qcow2_close(bs);
+
+    memset(s, 0, sizeof(BDRVQcowState));
+    qcow2_open(bs, flags);
+
+    if (crypt_method) {
+        s->crypt_method = crypt_method;
+        memcpy(&s->aes_encrypt_key, &aes_encrypt_key, sizeof(aes_encrypt_key));
+        memcpy(&s->aes_decrypt_key, &aes_decrypt_key, sizeof(aes_decrypt_key));
+    }
+}
+
 /*
  * Updates the variable length parts of the qcow2 header, i.e. the backing file
  * name and all extensions. qcow2 was not designed to allow such changes, so if
@@ -978,11 +1010,17 @@ static int qcow2_make_empty(BlockDriverState *bs)
     return 0;
 }
 
-static int qcow2_discard(BlockDriverState *bs, int64_t sector_num,
-    int nb_sectors)
+static coroutine_fn int qcow2_co_discard(BlockDriverState *bs,
+    int64_t sector_num, int nb_sectors)
 {
-    return qcow2_discard_clusters(bs, sector_num << BDRV_SECTOR_BITS,
+    int ret;
+    BDRVQcowState *s = bs->opaque;
+
+    qemu_co_mutex_lock(&s->lock);
+    ret = qcow2_discard_clusters(bs, sector_num << BDRV_SECTOR_BITS,
         nb_sectors);
+    qemu_co_mutex_unlock(&s->lock);
+    return ret;
 }
 
 static int qcow2_truncate(BlockDriverState *bs, int64_t offset)
@@ -1053,8 +1091,8 @@ static int qcow2_write_compressed(BlockDriverState *bs, int64_t sector_num,
                        Z_DEFLATED, -12,
                        9, Z_DEFAULT_STRATEGY);
     if (ret != 0) {
-        g_free(out_buf);
-        return -1;
+        ret = -EINVAL;
+        goto fail;
     }
 
     strm.avail_in = s->cluster_size;
@@ -1064,9 +1102,9 @@ static int qcow2_write_compressed(BlockDriverState *bs, int64_t sector_num,
 
     ret = deflate(&strm, Z_FINISH);
     if (ret != Z_STREAM_END && ret != Z_OK) {
-        g_free(out_buf);
         deflateEnd(&strm);
-        return -1;
+        ret = -EINVAL;
+        goto fail;
     }
     out_len = strm.next_out - out_buf;
 
@@ -1074,60 +1112,56 @@ static int qcow2_write_compressed(BlockDriverState *bs, int64_t sector_num,
 
     if (ret != Z_STREAM_END || out_len >= s->cluster_size) {
         /* could not compress: write normal cluster */
-        bdrv_write(bs, sector_num, buf, s->cluster_sectors);
+        ret = bdrv_write(bs, sector_num, buf, s->cluster_sectors);
+        if (ret < 0) {
+            goto fail;
+        }
     } else {
         cluster_offset = qcow2_alloc_compressed_cluster_offset(bs,
             sector_num << 9, out_len);
-        if (!cluster_offset)
-            return -1;
+        if (!cluster_offset) {
+            ret = -EIO;
+            goto fail;
+        }
         cluster_offset &= s->cluster_offset_mask;
         BLKDBG_EVENT(bs->file, BLKDBG_WRITE_COMPRESSED);
-        if (bdrv_pwrite(bs->file, cluster_offset, out_buf, out_len) != out_len) {
-            g_free(out_buf);
-            return -1;
+        ret = bdrv_pwrite(bs->file, cluster_offset, out_buf, out_len);
+        if (ret < 0) {
+            goto fail;
         }
     }
 
+    ret = 0;
+fail:
     g_free(out_buf);
+    return ret;
+}
+
+static int qcow2_co_flush_to_os(BlockDriverState *bs)
+{
+    BDRVQcowState *s = bs->opaque;
+    int ret;
+
+    qemu_co_mutex_lock(&s->lock);
+    ret = qcow2_cache_flush(bs, s->l2_table_cache);
+    if (ret < 0) {
+        qemu_co_mutex_unlock(&s->lock);
+        return ret;
+    }
+
+    ret = qcow2_cache_flush(bs, s->refcount_block_cache);
+    if (ret < 0) {
+        qemu_co_mutex_unlock(&s->lock);
+        return ret;
+    }
+    qemu_co_mutex_unlock(&s->lock);
+
     return 0;
 }
 
-static int qcow2_flush(BlockDriverState *bs)
+static int qcow2_co_flush_to_disk(BlockDriverState *bs)
 {
-    BDRVQcowState *s = bs->opaque;
-    int ret;
-
-    ret = qcow2_cache_flush(bs, s->l2_table_cache);
-    if (ret < 0) {
-        return ret;
-    }
-
-    ret = qcow2_cache_flush(bs, s->refcount_block_cache);
-    if (ret < 0) {
-        return ret;
-    }
-
-    return bdrv_flush(bs->file);
-}
-
-static BlockDriverAIOCB *qcow2_aio_flush(BlockDriverState *bs,
-                                         BlockDriverCompletionFunc *cb,
-                                         void *opaque)
-{
-    BDRVQcowState *s = bs->opaque;
-    int ret;
-
-    ret = qcow2_cache_flush(bs, s->l2_table_cache);
-    if (ret < 0) {
-        return NULL;
-    }
-
-    ret = qcow2_cache_flush(bs, s->refcount_block_cache);
-    if (ret < 0) {
-        return NULL;
-    }
-
-    return bdrv_aio_flush(bs->file, cb, opaque);
+    return bdrv_co_flush(bs->file);
 }
 
 static int64_t qcow2_vm_state_offset(BDRVQcowState *s)
@@ -1242,16 +1276,16 @@ static BlockDriver bdrv_qcow2 = {
     .bdrv_open          = qcow2_open,
     .bdrv_close         = qcow2_close,
     .bdrv_create        = qcow2_create,
-    .bdrv_flush         = qcow2_flush,
     .bdrv_is_allocated  = qcow2_is_allocated,
     .bdrv_set_key       = qcow2_set_key,
     .bdrv_make_empty    = qcow2_make_empty,
 
-    .bdrv_co_readv      = qcow2_co_readv,
-    .bdrv_co_writev     = qcow2_co_writev,
-    .bdrv_aio_flush     = qcow2_aio_flush,
+    .bdrv_co_readv          = qcow2_co_readv,
+    .bdrv_co_writev         = qcow2_co_writev,
+    .bdrv_co_flush_to_os    = qcow2_co_flush_to_os,
+    .bdrv_co_flush_to_disk  = qcow2_co_flush_to_disk,
 
-    .bdrv_discard           = qcow2_discard,
+    .bdrv_co_discard        = qcow2_co_discard,
     .bdrv_truncate          = qcow2_truncate,
     .bdrv_write_compressed  = qcow2_write_compressed,
 
@@ -1266,6 +1300,8 @@ static BlockDriver bdrv_qcow2 = {
     .bdrv_load_vmstate    = qcow2_load_vmstate,
 
     .bdrv_change_backing_file   = qcow2_change_backing_file,
+
+    .bdrv_invalidate_cache      = qcow2_invalidate_cache,
 
     .create_options = qcow2_create_options,
     .bdrv_check = qcow2_check,

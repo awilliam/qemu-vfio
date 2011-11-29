@@ -437,37 +437,39 @@ struct EHCIState {
     } while(0)
 
 static const char *ehci_state_names[] = {
-    [ EST_INACTIVE ]     = "INACTIVE",
-    [ EST_ACTIVE ]       = "ACTIVE",
-    [ EST_EXECUTING ]    = "EXECUTING",
-    [ EST_SLEEPING ]     = "SLEEPING",
-    [ EST_WAITLISTHEAD ] = "WAITLISTHEAD",
-    [ EST_FETCHENTRY ]   = "FETCH ENTRY",
-    [ EST_FETCHQH ]      = "FETCH QH",
-    [ EST_FETCHITD ]     = "FETCH ITD",
-    [ EST_ADVANCEQUEUE ] = "ADVANCEQUEUE",
-    [ EST_FETCHQTD ]     = "FETCH QTD",
-    [ EST_EXECUTE ]      = "EXECUTE",
-    [ EST_WRITEBACK ]    = "WRITEBACK",
-    [ EST_HORIZONTALQH ] = "HORIZONTALQH",
+    [EST_INACTIVE]     = "INACTIVE",
+    [EST_ACTIVE]       = "ACTIVE",
+    [EST_EXECUTING]    = "EXECUTING",
+    [EST_SLEEPING]     = "SLEEPING",
+    [EST_WAITLISTHEAD] = "WAITLISTHEAD",
+    [EST_FETCHENTRY]   = "FETCH ENTRY",
+    [EST_FETCHQH]      = "FETCH QH",
+    [EST_FETCHITD]     = "FETCH ITD",
+    [EST_ADVANCEQUEUE] = "ADVANCEQUEUE",
+    [EST_FETCHQTD]     = "FETCH QTD",
+    [EST_EXECUTE]      = "EXECUTE",
+    [EST_WRITEBACK]    = "WRITEBACK",
+    [EST_HORIZONTALQH] = "HORIZONTALQH",
 };
 
 static const char *ehci_mmio_names[] = {
-    [ CAPLENGTH ]        = "CAPLENGTH",
-    [ HCIVERSION ]       = "HCIVERSION",
-    [ HCSPARAMS ]        = "HCSPARAMS",
-    [ HCCPARAMS ]        = "HCCPARAMS",
-    [ USBCMD ]           = "USBCMD",
-    [ USBSTS ]           = "USBSTS",
-    [ USBINTR ]          = "USBINTR",
-    [ FRINDEX ]          = "FRINDEX",
-    [ PERIODICLISTBASE ] = "P-LIST BASE",
-    [ ASYNCLISTADDR ]    = "A-LIST ADDR",
-    [ PORTSC_BEGIN ]     = "PORTSC #0",
-    [ PORTSC_BEGIN + 4]  = "PORTSC #1",
-    [ PORTSC_BEGIN + 8]  = "PORTSC #2",
-    [ PORTSC_BEGIN + 12] = "PORTSC #3",
-    [ CONFIGFLAG ]       = "CONFIGFLAG",
+    [CAPLENGTH]         = "CAPLENGTH",
+    [HCIVERSION]        = "HCIVERSION",
+    [HCSPARAMS]         = "HCSPARAMS",
+    [HCCPARAMS]         = "HCCPARAMS",
+    [USBCMD]            = "USBCMD",
+    [USBSTS]            = "USBSTS",
+    [USBINTR]           = "USBINTR",
+    [FRINDEX]           = "FRINDEX",
+    [PERIODICLISTBASE]  = "P-LIST BASE",
+    [ASYNCLISTADDR]     = "A-LIST ADDR",
+    [PORTSC_BEGIN]      = "PORTSC #0",
+    [PORTSC_BEGIN + 4]  = "PORTSC #1",
+    [PORTSC_BEGIN + 8]  = "PORTSC #2",
+    [PORTSC_BEGIN + 12] = "PORTSC #3",
+    [PORTSC_BEGIN + 16] = "PORTSC #4",
+    [PORTSC_BEGIN + 20] = "PORTSC #5",
+    [CONFIGFLAG]        = "CONFIGFLAG",
 };
 
 static const char *nr2str(const char **n, size_t len, uint32_t nr)
@@ -880,6 +882,7 @@ static void ehci_reset(void *opaque)
         }
         if (devs[i] && devs[i]->attached) {
             usb_attach(&s->ports[i]);
+            usb_send_msg(devs[i], USB_MSG_RESET);
         }
     }
     ehci_queues_rip_all(s);
@@ -978,8 +981,7 @@ static void handle_port_status_write(EHCIState *s, int port, uint32_t val)
     if (!(val & PORTSC_PRESET) &&(*portsc & PORTSC_PRESET)) {
         trace_usb_ehci_port_reset(port, 0);
         if (dev && dev->attached) {
-            usb_attach(&s->ports[port]);
-            usb_send_msg(dev, USB_MSG_RESET);
+            usb_reset(&s->ports[port]);
             *portsc &= ~PORTSC_CSC;
         }
 
@@ -1101,12 +1103,13 @@ static void ehci_mem_writel(void *ptr, target_phys_addr_t addr, uint32_t val)
 // TODO : Put in common header file, duplication from usb-ohci.c
 
 /* Get an array of dwords from main memory */
-static inline int get_dwords(uint32_t addr, uint32_t *buf, int num)
+static inline int get_dwords(EHCIState *ehci, uint32_t addr,
+                             uint32_t *buf, int num)
 {
     int i;
 
     for(i = 0; i < num; i++, buf++, addr += sizeof(*buf)) {
-        cpu_physical_memory_rw(addr,(uint8_t *)buf, sizeof(*buf), 0);
+        pci_dma_read(&ehci->dev, addr, (uint8_t *)buf, sizeof(*buf));
         *buf = le32_to_cpu(*buf);
     }
 
@@ -1114,13 +1117,14 @@ static inline int get_dwords(uint32_t addr, uint32_t *buf, int num)
 }
 
 /* Put an array of dwords in to main memory */
-static inline int put_dwords(uint32_t addr, uint32_t *buf, int num)
+static inline int put_dwords(EHCIState *ehci, uint32_t addr,
+                             uint32_t *buf, int num)
 {
     int i;
 
     for(i = 0; i < num; i++, buf++, addr += sizeof(*buf)) {
         uint32_t tmp = cpu_to_le32(*buf);
-        cpu_physical_memory_rw(addr,(uint8_t *)&tmp, sizeof(tmp), 1);
+        pci_dma_write(&ehci->dev, addr, (uint8_t *)&tmp, sizeof(tmp));
     }
 
     return 1;
@@ -1169,7 +1173,8 @@ static int ehci_qh_do_overlay(EHCIQueue *q)
     q->qh.bufptr[1] &= ~BUFPTR_CPROGMASK_MASK;
     q->qh.bufptr[2] &= ~BUFPTR_FRAMETAG_MASK;
 
-    put_dwords(NLPTR_GET(q->qhaddr), (uint32_t *) &q->qh, sizeof(EHCIqh) >> 2);
+    put_dwords(q->ehci, NLPTR_GET(q->qhaddr), (uint32_t *) &q->qh,
+               sizeof(EHCIqh) >> 2);
 
     return 0;
 }
@@ -1177,12 +1182,12 @@ static int ehci_qh_do_overlay(EHCIQueue *q)
 static int ehci_init_transfer(EHCIQueue *q)
 {
     uint32_t cpage, offset, bytes, plen;
-    target_phys_addr_t page;
+    dma_addr_t page;
 
     cpage  = get_field(q->qh.token, QTD_TOKEN_CPAGE);
     bytes  = get_field(q->qh.token, QTD_TOKEN_TBYTES);
     offset = q->qh.bufptr[0] & ~QTD_BUFPTR_MASK;
-    qemu_sglist_init(&q->sgl, 5);
+    pci_dma_sglist_init(&q->sgl, &q->ehci->dev, 5);
 
     while (bytes > 0) {
         if (cpage > 4) {
@@ -1428,7 +1433,7 @@ static int ehci_process_itd(EHCIState *ehci,
                 return USB_RET_PROCERR;
             }
 
-            qemu_sglist_init(&ehci->isgl, 2);
+            pci_dma_sglist_init(&ehci->isgl, &ehci->dev, 2);
             if (off + len > 4096) {
                 /* transfer crosses page border */
                 uint32_t len2 = off + len - 4096;
@@ -1532,7 +1537,8 @@ static int ehci_state_waitlisthead(EHCIState *ehci,  int async)
 
     /*  Find the head of the list (4.9.1.1) */
     for(i = 0; i < MAX_QH; i++) {
-        get_dwords(NLPTR_GET(entry), (uint32_t *) &qh, sizeof(EHCIqh) >> 2);
+        get_dwords(ehci, NLPTR_GET(entry), (uint32_t *) &qh,
+                   sizeof(EHCIqh) >> 2);
         ehci_trace_qh(NULL, NLPTR_GET(entry), &qh);
 
         if (qh.epchar & QH_EPCHAR_H) {
@@ -1629,7 +1635,8 @@ static EHCIQueue *ehci_state_fetchqh(EHCIState *ehci, int async)
         goto out;
     }
 
-    get_dwords(NLPTR_GET(q->qhaddr), (uint32_t *) &q->qh, sizeof(EHCIqh) >> 2);
+    get_dwords(ehci, NLPTR_GET(q->qhaddr),
+               (uint32_t *) &q->qh, sizeof(EHCIqh) >> 2);
     ehci_trace_qh(q, NLPTR_GET(q->qhaddr), &q->qh);
 
     if (q->async == EHCI_ASYNC_INFLIGHT) {
@@ -1698,7 +1705,7 @@ static int ehci_state_fetchitd(EHCIState *ehci, int async)
     assert(!async);
     entry = ehci_get_fetch_addr(ehci, async);
 
-    get_dwords(NLPTR_GET(entry),(uint32_t *) &itd,
+    get_dwords(ehci, NLPTR_GET(entry), (uint32_t *) &itd,
                sizeof(EHCIitd) >> 2);
     ehci_trace_itd(ehci, entry, &itd);
 
@@ -1706,8 +1713,8 @@ static int ehci_state_fetchitd(EHCIState *ehci, int async)
         return -1;
     }
 
-    put_dwords(NLPTR_GET(entry), (uint32_t *) &itd,
-                sizeof(EHCIitd) >> 2);
+    put_dwords(ehci, NLPTR_GET(entry), (uint32_t *) &itd,
+               sizeof(EHCIitd) >> 2);
     ehci_set_fetch_addr(ehci, async, itd.next);
     ehci_set_state(ehci, async, EST_FETCHENTRY);
 
@@ -1722,7 +1729,7 @@ static int ehci_state_fetchsitd(EHCIState *ehci, int async)
     assert(!async);
     entry = ehci_get_fetch_addr(ehci, async);
 
-    get_dwords(NLPTR_GET(entry), (uint32_t *)&sitd,
+    get_dwords(ehci, NLPTR_GET(entry), (uint32_t *)&sitd,
                sizeof(EHCIsitd) >> 2);
     ehci_trace_sitd(ehci, entry, &sitd);
 
@@ -1784,7 +1791,8 @@ static int ehci_state_fetchqtd(EHCIQueue *q, int async)
 {
     int again = 0;
 
-    get_dwords(NLPTR_GET(q->qtdaddr),(uint32_t *) &q->qtd, sizeof(EHCIqtd) >> 2);
+    get_dwords(q->ehci, NLPTR_GET(q->qtdaddr), (uint32_t *) &q->qtd,
+               sizeof(EHCIqtd) >> 2);
     ehci_trace_qtd(q, NLPTR_GET(q->qtdaddr), &q->qtd);
 
     if (q->qtd.token & QTD_TOKEN_ACTIVE) {
@@ -1827,7 +1835,7 @@ static void ehci_flush_qh(EHCIQueue *q)
     uint32_t dwords = sizeof(EHCIqh) >> 2;
     uint32_t addr = NLPTR_GET(q->qhaddr);
 
-    put_dwords(addr + 3 * sizeof(uint32_t), qh + 3, dwords - 3);
+    put_dwords(q->ehci, addr + 3 * sizeof(uint32_t), qh + 3, dwords - 3);
 }
 
 static int ehci_state_execute(EHCIQueue *q, int async)
@@ -1947,8 +1955,8 @@ static int ehci_state_writeback(EHCIQueue *q, int async)
 
     /*  Write back the QTD from the QH area */
     ehci_trace_qtd(q, NLPTR_GET(q->qtdaddr), (EHCIqtd*) &q->qh.next_qtd);
-    put_dwords(NLPTR_GET(q->qtdaddr),(uint32_t *) &q->qh.next_qtd,
-                sizeof(EHCIqtd) >> 2);
+    put_dwords(q->ehci, NLPTR_GET(q->qtdaddr), (uint32_t *) &q->qh.next_qtd,
+               sizeof(EHCIqtd) >> 2);
 
     /*
      * EHCI specs say go horizontal here.
@@ -2040,6 +2048,7 @@ static void ehci_advance_state(EHCIState *ehci,
             break;
 
         case EST_WRITEBACK:
+            assert(q != NULL);
             again = ehci_state_writeback(q, async);
             break;
 
@@ -2148,7 +2157,7 @@ static void ehci_advance_periodic_state(EHCIState *ehci)
         }
         list |= ((ehci->frindex & 0x1ff8) >> 1);
 
-        cpu_physical_memory_rw(list, (uint8_t *) &entry, sizeof entry, 0);
+        pci_dma_read(&ehci->dev, list, (uint8_t *) &entry, sizeof entry);
         entry = le32_to_cpu(entry);
 
         DPRINTF("PERIODIC state adv fr=%d.  [%08X] -> %08X\n",

@@ -127,8 +127,8 @@ static const USBDescDevice desc_device_hub = {
 
 static const USBDesc desc_hub = {
     .id = {
-        .idVendor          = 0,
-        .idProduct         = 0,
+        .idVendor          = 0x0409,
+        .idProduct         = 0x55aa,
         .bcdDevice         = 0x0101,
         .iManufacturer     = STR_MANUFACTURER,
         .iProduct          = STR_PRODUCT,
@@ -163,12 +163,15 @@ static void usb_hub_attach(USBPort *port1)
     } else {
         port->wPortStatus &= ~PORT_STAT_LOW_SPEED;
     }
+    usb_wakeup(&s->dev);
 }
 
 static void usb_hub_detach(USBPort *port1)
 {
     USBHubState *s = port1->opaque;
     USBHubPort *port = &s->ports[port1->index];
+
+    usb_wakeup(&s->dev);
 
     /* Let upstream know the device on this port is gone */
     s->dev.port->ops->child_detach(s->dev.port, port1->dev);
@@ -207,15 +210,34 @@ static void usb_hub_complete(USBPort *port, USBPacket *packet)
     /*
      * Just pass it along upstream for now.
      *
-     * If we ever inplement usb 2.0 split transactions this will
+     * If we ever implement usb 2.0 split transactions this will
      * become a little more complicated ...
+     *
+     * Can't use usb_packet_complete() here because packet->owner is
+     * cleared already, go call the ->complete() callback directly
+     * instead.
      */
-    usb_packet_complete(&s->dev, packet);
+    s->dev.port->ops->complete(s->dev.port, packet);
 }
 
 static void usb_hub_handle_reset(USBDevice *dev)
 {
-    /* XXX: do it */
+    USBHubState *s = DO_UPCAST(USBHubState, dev, dev);
+    USBHubPort *port;
+    int i;
+
+    for (i = 0; i < NUM_PORTS; i++) {
+        port = s->ports + i;
+        port->wPortStatus = PORT_STAT_POWER;
+        port->wPortChange = 0;
+        if (port->port.dev && port->port.dev->attached) {
+            port->wPortStatus |= PORT_STAT_CONNECTION;
+            port->wPortChange |= PORT_STAT_C_CONNECTION;
+            if (port->port.dev->speed == USB_SPEED_LOW) {
+                port->wPortStatus |= PORT_STAT_LOW_SPEED;
+            }
+        }
+    }
 }
 
 static int usb_hub_handle_control(USBDevice *dev, USBPacket *p,
@@ -289,7 +311,7 @@ static int usb_hub_handle_control(USBDevice *dev, USBPacket *p,
                 port->wPortStatus |= PORT_STAT_SUSPEND;
                 break;
             case PORT_RESET:
-                if (dev) {
+                if (dev && dev->attached) {
                     usb_send_msg(dev, USB_MSG_RESET);
                     port->wPortChange |= PORT_STAT_C_RESET;
                     /* set enable bit */
@@ -429,7 +451,7 @@ static int usb_hub_broadcast_packet(USBHubState *s, USBPacket *p)
     for(i = 0; i < NUM_PORTS; i++) {
         port = &s->ports[i];
         dev = port->port.dev;
-        if (dev && (port->wPortStatus & PORT_STAT_ENABLE)) {
+        if (dev && dev->attached && (port->wPortStatus & PORT_STAT_ENABLE)) {
             ret = usb_handle_packet(dev, p);
             if (ret != USB_RET_NODEV) {
                 return ret;
@@ -490,9 +512,8 @@ static int usb_hub_initfn(USBDevice *dev)
                           &port->port, s, i, &usb_hub_port_ops,
                           USB_SPEED_MASK_LOW | USB_SPEED_MASK_FULL);
         usb_port_location(&port->port, dev->port, i+1);
-        port->wPortStatus = PORT_STAT_POWER;
-        port->wPortChange = 0;
     }
+    usb_hub_handle_reset(dev);
     return 0;
 }
 

@@ -148,6 +148,9 @@ Define a new drive. Valid options are:
 This option defines which disk image (@pxref{disk_images}) to use with
 this drive. If the filename contains comma, you must double it
 (for instance, "file=my,,file" to use file "my,file").
+
+Special files such as iSCSI devices can be specified using protocol
+specific URLs. See the section for "Device URL Syntax" for more information.
 @item if=@var{interface}
 This option defines on which type on interface the drive is connected.
 Available types are: ide, scsi, sd, mtd, floppy, pflash, virtio.
@@ -522,74 +525,119 @@ possible drivers and properties, use @code{-device ?} and
 @code{-device @var{driver},?}.
 ETEXI
 
+DEFHEADING()
+
 DEFHEADING(File system options:)
 
 DEF("fsdev", HAS_ARG, QEMU_OPTION_fsdev,
-    "-fsdev local,id=id,path=path,security_model=[mapped|passthrough|none]\n",
+    "-fsdev fsdriver,id=id,path=path,[security_model={mapped|passthrough|none}]\n"
+    "       [,writeout=immediate][,readonly]\n",
     QEMU_ARCH_ALL)
 
 STEXI
 
-The general form of a File system device option is:
-@table @option
-
-@item -fsdev @var{fstype} ,id=@var{id} [,@var{options}]
+@item -fsdev @var{fsdriver},id=@var{id},path=@var{path},[security_model=@var{security_model}][,writeout=@var{writeout}][,readonly]
 @findex -fsdev
-Fstype is one of:
-@option{local},
-The specific Fstype will determine the applicable options.
-
-Options to each backend are described below.
-
-@item -fsdev local ,id=@var{id} ,path=@var{path} ,security_model=@var{security_model}
-
-Create a file-system-"device" for local-filesystem.
-
-@option{local} is only available on Linux.
-
-@option{path} specifies the path to be exported. @option{path} is required.
-
-@option{security_model} specifies the security model to be followed.
-@option{security_model} is required.
-
+Define a new file system device. Valid options are:
+@table @option
+@item @var{fsdriver}
+This option specifies the fs driver backend to use.
+Currently "local" and "handle" file system drivers are supported.
+@item id=@var{id}
+Specifies identifier for this device
+@item path=@var{path}
+Specifies the export path for the file system device. Files under
+this path will be available to the 9p client on the guest.
+@item security_model=@var{security_model}
+Specifies the security model to be used for this export path.
+Supported security models are "passthrough", "mapped" and "none".
+In "passthrough" security model, files are stored using the same
+credentials as they are created on the guest. This requires qemu
+to run as root. In "mapped" security model, some of the file
+attributes like uid, gid, mode bits and link target are stored as
+file attributes. Directories exported by this security model cannot
+interact with other unix tools. "none" security model is same as
+passthrough except the sever won't report failures if it fails to
+set file attributes like ownership. Security model is mandatory
+only for local fsdriver. Other fsdrivers (like handle) don't take
+security model as a parameter.
+@item writeout=@var{writeout}
+This is an optional argument. The only supported value is "immediate".
+This means that host page cache will be used to read and write data but
+write notification will be sent to the guest only when the data has been
+reported as written by the storage subsystem.
+@item readonly
+Enables exporting 9p share as a readonly mount for guests. By default
+read-write access is given.
 @end table
+
+-fsdev option is used along with -device driver "virtio-9p-pci".
+@item -device virtio-9p-pci,fsdev=@var{id},mount_tag=@var{mount_tag}
+Options for virtio-9p-pci driver are:
+@table @option
+@item fsdev=@var{id}
+Specifies the id value specified along with -fsdev option
+@item mount_tag=@var{mount_tag}
+Specifies the tag name to be used by the guest to mount this export point
+@end table
+
 ETEXI
+
+DEFHEADING()
 
 DEFHEADING(Virtual File system pass-through options:)
 
 DEF("virtfs", HAS_ARG, QEMU_OPTION_virtfs,
-    "-virtfs local,path=path,mount_tag=tag,security_model=[mapped|passthrough|none]\n",
+    "-virtfs local,path=path,mount_tag=tag,security_model=[mapped|passthrough|none]\n"
+    "        [,writeout=immediate][,readonly]\n",
     QEMU_ARCH_ALL)
 
 STEXI
 
-The general form of a Virtual File system pass-through option is:
-@table @option
-
-@item -virtfs @var{fstype} [,@var{options}]
+@item -virtfs @var{fsdriver},path=@var{path},mount_tag=@var{mount_tag},security_model=@var{security_model}[,writeout=@var{writeout}][,readonly]
 @findex -virtfs
-Fstype is one of:
-@option{local},
-The specific Fstype will determine the applicable options.
 
-Options to each backend are described below.
-
-@item -virtfs local ,path=@var{path} ,mount_tag=@var{mount_tag} ,security_model=@var{security_model}
-
-Create a Virtual file-system-pass through for local-filesystem.
-
-@option{local} is only available on Linux.
-
-@option{path} specifies the path to be exported. @option{path} is required.
-
-@option{security_model} specifies the security model to be followed.
-@option{security_model} is required.
-
-
-@option{mount_tag} specifies the tag with which the exported file is mounted.
-@option{mount_tag} is required.
-
+The general form of a Virtual File system pass-through options are:
+@table @option
+@item @var{fsdriver}
+This option specifies the fs driver backend to use.
+Currently "local" and "handle" file system drivers are supported.
+@item id=@var{id}
+Specifies identifier for this device
+@item path=@var{path}
+Specifies the export path for the file system device. Files under
+this path will be available to the 9p client on the guest.
+@item security_model=@var{security_model}
+Specifies the security model to be used for this export path.
+Supported security models are "passthrough", "mapped" and "none".
+In "passthrough" security model, files are stored using the same
+credentials as they are created on the guest. This requires qemu
+to run as root. In "mapped" security model, some of the file
+attributes like uid, gid, mode bits and link target are stored as
+file attributes. Directories exported by this security model cannot
+interact with other unix tools. "none" security model is same as
+passthrough except the sever won't report failures if it fails to
+set file attributes like ownership. Security model is mandatory only
+for local fsdriver. Other fsdrivers (like handle) don't take security
+model as a parameter.
+@item writeout=@var{writeout}
+This is an optional argument. The only supported value is "immediate".
+This means that host page cache will be used to read and write data but
+write notification will be sent to the guest only when the data has been
+reported as written by the storage subsystem.
+@item readonly
+Enables exporting 9p share as a readonly mount for guests. By default
+read-write access is given.
 @end table
+ETEXI
+
+DEF("virtfs_synth", 0, QEMU_OPTION_virtfs_synth,
+    "-virtfs_synth Create synthetic file system image\n",
+    QEMU_ARCH_ALL)
+STEXI
+@item -virtfs_synth
+@findex -virtfs_synth
+Create synthetic file system image
 ETEXI
 
 DEFHEADING()
@@ -1673,20 +1721,107 @@ Connect to a local parallel port.
 @option{path} specifies the path to the parallel port device. @option{path} is
 required.
 
-#if defined(CONFIG_SPICE)
 @item -chardev spicevmc ,id=@var{id} ,debug=@var{debug}, name=@var{name}
+
+@option{spicevmc} is only available when spice support is built in.
 
 @option{debug} debug level for spicevmc
 
 @option{name} name of spice channel to connect to
 
 Connect to a spice virtual machine channel, such as vdiport.
-#endif
 
 @end table
 ETEXI
 
 DEFHEADING()
+
+STEXI
+DEFHEADING(Device URL Syntax:)
+
+In addition to using normal file images for the emulated storage devices,
+QEMU can also use networked resources such as iSCSI devices. These are
+specified using a special URL syntax.
+
+@table @option
+@item iSCSI
+iSCSI support allows QEMU to access iSCSI resources directly and use as
+images for the guest storage. Both disk and cdrom images are supported.
+
+Syntax for specifying iSCSI LUNs is
+``iscsi://<target-ip>[:<port>]/<target-iqn>/<lun>''
+
+Example (without authentication):
+@example
+qemu -cdrom iscsi://192.0.2.1/iqn.2001-04.com.example/2 \
+--drive file=iscsi://192.0.2.1/iqn.2001-04.com.example/1
+@end example
+
+Example (CHAP username/password via URL):
+@example
+qemu --drive file=iscsi://user%password@@192.0.2.1/iqn.2001-04.com.example/1
+@end example
+
+Example (CHAP username/password via environment variables):
+@example
+LIBISCSI_CHAP_USERNAME="user" \
+LIBISCSI_CHAP_PASSWORD="password" \
+qemu --drive file=iscsi://192.0.2.1/iqn.2001-04.com.example/1
+@end example
+
+iSCSI support is an optional feature of QEMU and only available when
+compiled and linked against libiscsi.
+
+@item NBD
+QEMU supports NBD (Network Block Devices) both using TCP protocol as well
+as Unix Domain Sockets.
+
+Syntax for specifying a NBD device using TCP
+``nbd:<server-ip>:<port>[:exportname=<export>]''
+
+Syntax for specifying a NBD device using Unix Domain Sockets
+``nbd:unix:<domain-socket>[:exportname=<export>]''
+
+
+Example for TCP
+@example
+qemu --drive file=nbd:192.0.2.1:30000
+@end example
+
+Example for Unix Domain Sockets
+@example
+qemu --drive file=nbd:unix:/tmp/nbd-socket
+@end example
+
+@item Sheepdog
+Sheepdog is a distributed storage system for QEMU.
+QEMU supports using either local sheepdog devices or remote networked
+devices.
+
+Syntax for specifying a sheepdog device
+@table @list
+``sheepdog:<vdiname>''
+
+``sheepdog:<vdiname>:<snapid>''
+
+``sheepdog:<vdiname>:<tag>''
+
+``sheepdog:<host>:<port>:<vdiname>''
+
+``sheepdog:<host>:<port>:<vdiname>:<snapid>''
+
+``sheepdog:<host>:<port>:<vdiname>:<tag>''
+@end table
+
+Example
+@example
+qemu --drive file=sheepdog:192.0.2.1:30000:MyVirtualMachine
+@end example
+
+See also @url{http://http://www.osrg.net/sheepdog/}.
+
+@end table
+ETEXI
 
 DEFHEADING(Bluetooth(R) options:)
 

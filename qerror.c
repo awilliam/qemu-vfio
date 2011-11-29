@@ -49,6 +49,10 @@ static const QErrorStringTable qerror_table[] = {
         .desc      = "Device '%(device)' can't go on a %(bad_bus_type) bus",
     },
     {
+        .error_fmt = QERR_BLOCK_FORMAT_FEATURE_NOT_SUPPORTED,
+        .desc      = "Block format '%(format)' used by device '%(name)' does not support feature '%(feature)'",
+    },
+    {
         .error_fmt = QERR_BUS_NOT_FOUND,
         .desc      = "Bus '%(bus)' not found",
     },
@@ -71,6 +75,10 @@ static const QErrorStringTable qerror_table[] = {
     {
         .error_fmt = QERR_DEVICE_IN_USE,
         .desc      = "Device '%(device)' is in use",
+    },
+    {
+        .error_fmt = QERR_DEVICE_FEATURE_BLOCKS_MIGRATION,
+        .desc      = "Migration is disabled when using feature '%(feature)' in device '%(device)'",
     },
     {
         .error_fmt = QERR_DEVICE_LOCKED,
@@ -115,6 +123,10 @@ static const QErrorStringTable qerror_table[] = {
     {
         .error_fmt = QERR_FD_NOT_SUPPLIED,
         .desc      = "No file descriptor supplied via SCM_RIGHTS",
+    },
+    {
+        .error_fmt = QERR_FEATURE_DISABLED,
+        .desc      = "The feature '%(name)' is not enabled",
     },
     {
         .error_fmt = QERR_INVALID_BLOCK_FORMAT,

@@ -26,7 +26,7 @@
 #define TCG_TARGET_WORDS_BIGENDIAN
 #define TCG_TARGET_NB_REGS 32
 
-enum {
+typedef enum {
     TCG_REG_R0 = 0,
     TCG_REG_R1,
     TCG_REG_R2,
@@ -59,7 +59,7 @@ enum {
     TCG_REG_R29,
     TCG_REG_R30,
     TCG_REG_R31
-};
+} TCGReg;
 
 /* used for function call generation */
 #define TCG_REG_CALL_STACK TCG_REG_R1
@@ -96,3 +96,7 @@ enum {
 #define TCG_AREG0 TCG_REG_R27
 
 #define TCG_TARGET_HAS_GUEST_BASE
+
+#define tcg_qemu_tb_exec(env, tb_ptr) \
+    ((long REGPARM __attribute__ ((longcall)) \
+      (*)(void *, void *))code_gen_prologue)(env, tb_ptr)

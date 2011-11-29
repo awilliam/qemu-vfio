@@ -148,6 +148,25 @@ static int usb_host_read_file(char *line, size_t line_size,
                             const char *device_file, const char *device_name);
 static int usb_linux_update_endp_table(USBHostDevice *s);
 
+static int usb_host_do_reset(USBHostDevice *dev)
+{
+    struct timeval s, e;
+    uint32_t usecs;
+    int ret;
+
+    gettimeofday(&s, NULL);
+    ret = ioctl(dev->fd, USBDEVFS_RESET);
+    gettimeofday(&e, NULL);
+    usecs = (e.tv_sec  - s.tv_sec) * 1000000;
+    usecs += e.tv_usec - s.tv_usec;
+    if (usecs > 1000000) {
+        /* more than a second, something is fishy, broken usb device? */
+        fprintf(stderr, "husb: device %d:%d reset took %d.%06d seconds\n",
+                dev->bus_num, dev->addr, usecs / 1000000, usecs % 1000000);
+    }
+    return ret;
+}
+
 static struct endp_data *get_endp(USBHostDevice *s, int pid, int ep)
 {
     struct endp_data *eps = pid == USB_TOKEN_IN ? s->ep_in : s->ep_out;
@@ -411,6 +430,100 @@ static void usb_host_async_cancel(USBDevice *dev, USBPacket *p)
     }
 }
 
+static int usb_host_claim_port(USBHostDevice *s)
+{
+#ifdef USBDEVFS_CLAIM_PORT
+    char *h, hub_name[64], line[1024];
+    int hub_addr, portnr, ret;
+
+    snprintf(hub_name, sizeof(hub_name), "%d-%s",
+             s->match.bus_num, s->match.port);
+
+    /* try strip off last ".$portnr" to get hub */
+    h = strrchr(hub_name, '.');
+    if (h != NULL) {
+        portnr = atoi(h+1);
+        *h = '\0';
+    } else {
+        /* no dot in there -> it is the root hub */
+        snprintf(hub_name, sizeof(hub_name), "usb%d",
+                 s->match.bus_num);
+        portnr = atoi(s->match.port);
+    }
+
+    if (!usb_host_read_file(line, sizeof(line), "devnum",
+                            hub_name)) {
+        return -1;
+    }
+    if (sscanf(line, "%d", &hub_addr) != 1) {
+        return -1;
+    }
+
+    if (!usb_host_device_path) {
+        return -1;
+    }
+    snprintf(line, sizeof(line), "%s/%03d/%03d",
+             usb_host_device_path, s->match.bus_num, hub_addr);
+    s->hub_fd = open(line, O_RDWR | O_NONBLOCK);
+    if (s->hub_fd < 0) {
+        return -1;
+    }
+
+    ret = ioctl(s->hub_fd, USBDEVFS_CLAIM_PORT, &portnr);
+    if (ret < 0) {
+        close(s->hub_fd);
+        s->hub_fd = -1;
+        return -1;
+    }
+
+    trace_usb_host_claim_port(s->match.bus_num, hub_addr, portnr);
+    return 0;
+#else
+    return -1;
+#endif
+}
+
+static int usb_host_disconnect_ifaces(USBHostDevice *dev, int nb_interfaces)
+{
+    /* earlier Linux 2.4 do not support that */
+#ifdef USBDEVFS_DISCONNECT
+    struct usbdevfs_ioctl ctrl;
+    int ret, interface;
+
+    for (interface = 0; interface < nb_interfaces; interface++) {
+        ctrl.ioctl_code = USBDEVFS_DISCONNECT;
+        ctrl.ifno = interface;
+        ctrl.data = 0;
+        ret = ioctl(dev->fd, USBDEVFS_IOCTL, &ctrl);
+        if (ret < 0 && errno != ENODATA) {
+            perror("USBDEVFS_DISCONNECT");
+            return -1;
+        }
+    }
+#endif
+    return 0;
+}
+
+static int usb_linux_get_num_interfaces(USBHostDevice *s)
+{
+    char device_name[64], line[1024];
+    int num_interfaces = 0;
+
+    if (usb_fs_type != USB_FS_SYS) {
+        return -1;
+    }
+
+    sprintf(device_name, "%d-%s", s->bus_num, s->port);
+    if (!usb_host_read_file(line, sizeof(line), "bNumInterfaces",
+                            device_name)) {
+        return -1;
+    }
+    if (sscanf(line, "%d", &num_interfaces) != 1) {
+        return -1;
+    }
+    return num_interfaces;
+}
+
 static int usb_host_claim_interfaces(USBHostDevice *dev, int configuration)
 {
     const char *op = NULL;
@@ -462,22 +575,9 @@ static int usb_host_claim_interfaces(USBHostDevice *dev, int configuration)
     }
     nb_interfaces = dev->descr[i + 4];
 
-#ifdef USBDEVFS_DISCONNECT
-    /* earlier Linux 2.4 do not support that */
-    {
-        struct usbdevfs_ioctl ctrl;
-        for (interface = 0; interface < nb_interfaces; interface++) {
-            ctrl.ioctl_code = USBDEVFS_DISCONNECT;
-            ctrl.ifno = interface;
-            ctrl.data = 0;
-            op = "USBDEVFS_DISCONNECT";
-            ret = ioctl(dev->fd, USBDEVFS_IOCTL, &ctrl);
-            if (ret < 0 && errno != ENODATA) {
-                goto fail;
-            }
-        }
+    if (usb_host_disconnect_ifaces(dev, nb_interfaces) < 0) {
+        goto fail;
     }
-#endif
 
     /* XXX: only grab if all interfaces are free */
     for (interface = 0; interface < nb_interfaces; interface++) {
@@ -525,7 +625,7 @@ static void usb_host_handle_reset(USBDevice *dev)
 
     trace_usb_host_reset(s->bus_num, s->addr);
 
-    ioctl(s->fd, USBDEVFS_RESET);
+    usb_host_do_reset(s);;
 
     usb_host_claim_interfaces(s, 0);
     usb_linux_update_endp_table(s);
@@ -840,13 +940,27 @@ static int usb_host_set_address(USBHostDevice *s, int addr)
 
 static int usb_host_set_config(USBHostDevice *s, int config)
 {
+    int ret, first = 1;
+
     trace_usb_host_set_config(s->bus_num, s->addr, config);
 
     usb_host_release_interfaces(s);
 
-    int ret = ioctl(s->fd, USBDEVFS_SETCONFIGURATION, &config);
+again:
+    ret = ioctl(s->fd, USBDEVFS_SETCONFIGURATION, &config);
 
     DPRINTF("husb: ctrl set config %d ret %d errno %d\n", config, ret, errno);
+
+    if (ret < 0 && errno == EBUSY && first) {
+        /* happens if usb device is in use by host drivers */
+        int count = usb_linux_get_num_interfaces(s);
+        if (count > 0) {
+            DPRINTF("husb: busy -> disconnecting %d interfaces\n", count);
+            usb_host_disconnect_ifaces(s, count);
+            first = 0;
+            goto again;
+        }
+    }
 
     if (ret < 0) {
         return ctrl_error();
@@ -1254,7 +1368,7 @@ static int usb_host_close(USBHostDevice *dev)
 {
     int i;
 
-    if (dev->fd == -1 || !dev->dev.attached) {
+    if (dev->fd == -1) {
         return -1;
     }
 
@@ -1272,8 +1386,10 @@ static int usb_host_close(USBHostDevice *dev)
     }
     async_complete(dev);
     dev->closing = 0;
-    usb_device_detach(&dev->dev);
-    ioctl(dev->fd, USBDEVFS_RESET);
+    if (dev->dev.attached) {
+        usb_device_detach(&dev->dev);
+    }
+    usb_host_do_reset(dev);
     close(dev->fd);
     dev->fd = -1;
     return 0;
@@ -1284,7 +1400,7 @@ static void usb_host_exit_notifier(struct Notifier *n, void *data)
     USBHostDevice *s = container_of(n, USBHostDevice, exit);
 
     if (s->fd != -1) {
-        ioctl(s->fd, USBDEVFS_RESET);
+        usb_host_do_reset(s);;
     }
 }
 
@@ -1301,56 +1417,9 @@ static int usb_host_initfn(USBDevice *dev)
     qemu_add_exit_notifier(&s->exit);
     usb_host_auto_check(NULL);
 
-#ifdef USBDEVFS_CLAIM_PORT
     if (s->match.bus_num != 0 && s->match.port != NULL) {
-        char *h, hub_name[64], line[1024];
-        int hub_addr, portnr, ret;
-
-        snprintf(hub_name, sizeof(hub_name), "%d-%s",
-                 s->match.bus_num, s->match.port);
-
-        /* try strip off last ".$portnr" to get hub */
-        h = strrchr(hub_name, '.');
-        if (h != NULL) {
-            portnr = atoi(h+1);
-            *h = '\0';
-        } else {
-            /* no dot in there -> it is the root hub */
-            snprintf(hub_name, sizeof(hub_name), "usb%d",
-                     s->match.bus_num);
-            portnr = atoi(s->match.port);
-        }
-
-        if (!usb_host_read_file(line, sizeof(line), "devnum",
-                                hub_name)) {
-            goto out;
-        }
-        if (sscanf(line, "%d", &hub_addr) != 1) {
-            goto out;
-        }
-
-        if (!usb_host_device_path) {
-            goto out;
-        }
-        snprintf(line, sizeof(line), "%s/%03d/%03d",
-                 usb_host_device_path, s->match.bus_num, hub_addr);
-        s->hub_fd = open(line, O_RDWR | O_NONBLOCK);
-        if (s->hub_fd < 0) {
-            goto out;
-        }
-
-        ret = ioctl(s->hub_fd, USBDEVFS_CLAIM_PORT, &portnr);
-        if (ret < 0) {
-            close(s->hub_fd);
-            s->hub_fd = -1;
-            goto out;
-        }
-
-        trace_usb_host_claim_port(s->match.bus_num, hub_addr, portnr);
+        usb_host_claim_port(s);
     }
-out:
-#endif
-
     return 0;
 }
 
@@ -1518,7 +1587,12 @@ static int usb_host_scan_dev(void *opaque, USBScanFunc *func)
         if (line[0] == 'T' && line[1] == ':') {
             if (device_count && (vendor_id || product_id)) {
                 /* New device.  Add the previously discovered device.  */
-                ret = func(opaque, bus_num, addr, 0, class_id, vendor_id,
+                if (port > 0) {
+                    snprintf(buf, sizeof(buf), "%d", port);
+                } else {
+                    snprintf(buf, sizeof(buf), "?");
+                }
+                ret = func(opaque, bus_num, addr, buf, class_id, vendor_id,
                            product_id, product_name, speed);
                 if (ret) {
                     goto the_end;

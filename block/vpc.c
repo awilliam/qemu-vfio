@@ -25,6 +25,7 @@
 #include "qemu-common.h"
 #include "block_int.h"
 #include "module.h"
+#include "migration.h"
 
 /**************************************************************/
 
@@ -110,6 +111,7 @@ struct vhd_dyndisk_header {
 };
 
 typedef struct BDRVVPCState {
+    CoMutex lock;
     uint8_t footer_buf[HEADER_SIZE];
     uint64_t free_data_block_offset;
     int max_table_entries;
@@ -127,6 +129,8 @@ typedef struct BDRVVPCState {
 
     uint64_t last_bitmap;
 #endif
+
+    Error *migration_blocker;
 } BDRVVPCState;
 
 static uint32_t vpc_checksum(uint8_t* buf, size_t size)
@@ -225,6 +229,14 @@ static int vpc_open(BlockDriverState *bs, int flags)
     s->pageentry_u16 = s->pageentry_u8;
     s->last_pagetable = -1;
 #endif
+
+    qemu_co_mutex_init(&s->lock);
+
+    /* Disable migration when VHD images are used */
+    error_set(&s->migration_blocker,
+              QERR_BLOCK_FORMAT_FEATURE_NOT_SUPPORTED,
+              "vpc", bs->device_name, "live migration");
+    migrate_add_blocker(s->migration_blocker);
 
     return 0;
  fail:
@@ -350,8 +362,11 @@ static int64_t alloc_block(BlockDriverState* bs, int64_t sector_num)
 
     // Initialize the block's bitmap
     memset(bitmap, 0xff, s->bitmap_size);
-    bdrv_pwrite_sync(bs->file, s->free_data_block_offset, bitmap,
+    ret = bdrv_pwrite_sync(bs->file, s->free_data_block_offset, bitmap,
         s->bitmap_size);
+    if (ret < 0) {
+        return ret;
+    }
 
     // Write new footer (the old one will be overwritten)
     s->free_data_block_offset += s->block_size + s->bitmap_size;
@@ -407,6 +422,17 @@ static int vpc_read(BlockDriverState *bs, int64_t sector_num,
     return 0;
 }
 
+static coroutine_fn int vpc_co_read(BlockDriverState *bs, int64_t sector_num,
+                                    uint8_t *buf, int nb_sectors)
+{
+    int ret;
+    BDRVVPCState *s = bs->opaque;
+    qemu_co_mutex_lock(&s->lock);
+    ret = vpc_read(bs, sector_num, buf, nb_sectors);
+    qemu_co_mutex_unlock(&s->lock);
+    return ret;
+}
+
 static int vpc_write(BlockDriverState *bs, int64_t sector_num,
     const uint8_t *buf, int nb_sectors)
 {
@@ -443,9 +469,20 @@ static int vpc_write(BlockDriverState *bs, int64_t sector_num,
     return 0;
 }
 
-static int vpc_flush(BlockDriverState *bs)
+static coroutine_fn int vpc_co_write(BlockDriverState *bs, int64_t sector_num,
+                                     const uint8_t *buf, int nb_sectors)
 {
-    return bdrv_flush(bs->file);
+    int ret;
+    BDRVVPCState *s = bs->opaque;
+    qemu_co_mutex_lock(&s->lock);
+    ret = vpc_write(bs, sector_num, buf, nb_sectors);
+    qemu_co_mutex_unlock(&s->lock);
+    return ret;
+}
+
+static coroutine_fn int vpc_co_flush(BlockDriverState *bs)
+{
+    return bdrv_co_flush(bs->file);
 }
 
 /*
@@ -593,7 +630,11 @@ static int vpc_create(const char *filename, QEMUOptionParameter *options)
 
     memcpy(dyndisk_header->magic, "cxsparse", 8);
 
-    dyndisk_header->data_offset = be64_to_cpu(0xFFFFFFFF);
+    /*
+     * Note: The spec is actually wrong here for data_offset, it says
+     * 0xFFFFFFFF, but MS tools expect all 64 bits to be set.
+     */
+    dyndisk_header->data_offset = be64_to_cpu(0xFFFFFFFFFFFFFFFFULL);
     dyndisk_header->table_offset = be64_to_cpu(3 * 512);
     dyndisk_header->version = be32_to_cpu(0x00010000);
     dyndisk_header->block_size = be32_to_cpu(block_size);
@@ -623,6 +664,9 @@ static void vpc_close(BlockDriverState *bs)
 #ifdef CACHE
     g_free(s->pageentry_u8);
 #endif
+
+    migrate_del_blocker(s->migration_blocker);
+    error_free(s->migration_blocker);
 }
 
 static QEMUOptionParameter vpc_create_options[] = {
@@ -637,13 +681,15 @@ static QEMUOptionParameter vpc_create_options[] = {
 static BlockDriver bdrv_vpc = {
     .format_name    = "vpc",
     .instance_size  = sizeof(BDRVVPCState),
+
     .bdrv_probe     = vpc_probe,
     .bdrv_open      = vpc_open,
-    .bdrv_read      = vpc_read,
-    .bdrv_write     = vpc_write,
-    .bdrv_flush     = vpc_flush,
     .bdrv_close     = vpc_close,
     .bdrv_create    = vpc_create,
+
+    .bdrv_read              = vpc_co_read,
+    .bdrv_write             = vpc_co_write,
+    .bdrv_co_flush_to_disk  = vpc_co_flush,
 
     .create_options = vpc_create_options,
 };

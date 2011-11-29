@@ -83,11 +83,6 @@
 /* Flags track per-device state like workarounds for quirks in older guests. */
 #define VIRTIO_PCI_FLAG_BUS_MASTER_BUG  (1 << 0)
 
-/* Performance improves when virtqueue kick processing is decoupled from the
- * vcpu thread using ioeventfd for some devices. */
-#define VIRTIO_PCI_FLAG_USE_IOEVENTFD_BIT 1
-#define VIRTIO_PCI_FLAG_USE_IOEVENTFD   (1 << VIRTIO_PCI_FLAG_USE_IOEVENTFD_BIT)
-
 /* QEMU doesn't strictly need write barriers since everything runs in
  * lock-step.  We'll leave the calls to wmb() in though to make it obvious for
  * KVM or if kqemu gets SMP support.
@@ -290,14 +285,9 @@ static void virtio_ioport_write(void *opaque, uint32_t addr, uint32_t val)
     case VIRTIO_PCI_GUEST_FEATURES:
 	/* Guest does not negotiate properly?  We have to assume nothing. */
 	if (val & (1 << VIRTIO_F_BAD_FEATURE)) {
-	    if (vdev->bad_features)
-		val = proxy->host_features & vdev->bad_features(vdev);
-	    else
-		val = 0;
+            val = vdev->bad_features ? vdev->bad_features(vdev) : 0;
 	}
-        if (vdev->set_features)
-            vdev->set_features(vdev, val);
-        vdev->guest_features = val;
+        virtio_set_features(vdev, val);
         break;
     case VIRTIO_PCI_QUEUE_PFN:
         pa = (target_phys_addr_t)val << VIRTIO_PCI_QUEUE_ADDR_SHIFT;

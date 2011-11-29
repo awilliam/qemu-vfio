@@ -29,6 +29,7 @@
 #include "hw/virtio.h"
 #include "hw/sysbus.h"
 #include "kvm.h"
+#include "exec-memory.h"
 
 #include "hw/s390-virtio-bus.h"
 
@@ -61,17 +62,6 @@
 
 static VirtIOS390Bus *s390_bus;
 static CPUState **ipi_states;
-
-void irq_info(Monitor *mon);
-void pic_info(Monitor *mon);
-
-void irq_info(Monitor *mon)
-{
-}
-
-void pic_info(Monitor *mon)
-{
-}
 
 CPUState *s390_cpu_addr2state(uint16_t cpu_addr)
 {
@@ -107,6 +97,7 @@ int s390_virtio_hypercall(CPUState *env, uint64_t mem, uint64_t hypercall)
 
         dev = s390_virtio_bus_find_mem(s390_bus, mem);
         virtio_reset(dev->vdev);
+        stb_phys(dev->dev_offs + VIRTIO_DEV_OFFS_STATUS, 0);
         s390_virtio_device_sync(dev);
         break;
     }
@@ -130,6 +121,34 @@ int s390_virtio_hypercall(CPUState *env, uint64_t mem, uint64_t hypercall)
     return r;
 }
 
+/*
+ * The number of running CPUs. On s390 a shutdown is the state of all CPUs
+ * being either stopped or disabled (for interrupts) waiting. We have to
+ * track this number to call the shutdown sequence accordingly. This
+ * number is modified either on startup or while holding the big qemu lock.
+ */
+static unsigned s390_running_cpus;
+
+void s390_add_running_cpu(CPUState *env)
+{
+    if (env->halted) {
+        s390_running_cpus++;
+        env->halted = 0;
+        env->exception_index = -1;
+    }
+}
+
+unsigned s390_del_running_cpu(CPUState *env)
+{
+    if (env->halted == 0) {
+        assert(s390_running_cpus >= 1);
+        s390_running_cpus--;
+        env->halted = 1;
+        env->exception_index = EXCP_HLT;
+    }
+    return s390_running_cpus;
+}
+
 /* PC hardware initialisation */
 static void s390_init(ram_addr_t my_ram_size,
                       const char *boot_device,
@@ -139,12 +158,16 @@ static void s390_init(ram_addr_t my_ram_size,
                       const char *cpu_model)
 {
     CPUState *env = NULL;
-    ram_addr_t ram_addr;
+    MemoryRegion *sysmem = get_system_memory();
+    MemoryRegion *ram = g_new(MemoryRegion, 1);
     ram_addr_t kernel_size = 0;
     ram_addr_t initrd_offset;
     ram_addr_t initrd_size = 0;
     int shift = 0;
     uint8_t *storage_keys;
+    void *virtio_region;
+    target_phys_addr_t virtio_region_len;
+    target_phys_addr_t virtio_region_start;
     int i;
 
     /* s390x ram size detection needs a 16bit multiplier + an increment. So
@@ -161,8 +184,17 @@ static void s390_init(ram_addr_t my_ram_size,
     s390_bus = s390_virtio_bus_init(&my_ram_size);
 
     /* allocate RAM */
-    ram_addr = qemu_ram_alloc(NULL, "s390.ram", my_ram_size);
-    cpu_register_physical_memory(0, my_ram_size, ram_addr);
+    memory_region_init_ram(ram, NULL, "s390.ram", my_ram_size);
+    memory_region_add_subregion(sysmem, 0, ram);
+
+    /* clear virtio region */
+    virtio_region_len = my_ram_size - ram_size;
+    virtio_region_start = ram_size;
+    virtio_region = cpu_physical_memory_map(virtio_region_start,
+                                            &virtio_region_len, true);
+    memset(virtio_region, 0, virtio_region_len);
+    cpu_physical_memory_unmap(virtio_region, virtio_region_len, 1,
+                              virtio_region_len);
 
     /* allocate storage keys */
     storage_keys = g_malloc0(my_ram_size / TARGET_PAGE_SIZE);
@@ -187,8 +219,8 @@ static void s390_init(ram_addr_t my_ram_size,
         tmp_env->storage_keys = storage_keys;
     }
 
-    env->halted = 0;
-    env->exception_index = 0;
+    /* One CPU has to run */
+    s390_add_running_cpu(env);
 
     if (kernel_filename) {
         kernel_size = load_image(kernel_filename, qemu_get_ram_ptr(0));
@@ -238,7 +270,7 @@ static void s390_init(ram_addr_t my_ram_size,
 
     if (kernel_cmdline) {
         cpu_physical_memory_write(KERN_PARM_AREA, kernel_cmdline,
-                                  strlen(kernel_cmdline));
+                                  strlen(kernel_cmdline) + 1);
     }
 
     /* Create VirtIO network adapters */

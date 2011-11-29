@@ -29,6 +29,7 @@
 #include "qemu-queue.h"
 #include "qemu-coroutine.h"
 #include "qemu-timer.h"
+#include "qapi-types.h"
 
 #define BLOCK_FLAG_ENCRYPT	1
 #define BLOCK_FLAG_COMPAT6	4
@@ -62,7 +63,6 @@ struct BlockDriver {
                       const uint8_t *buf, int nb_sectors);
     void (*bdrv_close)(BlockDriverState *bs);
     int (*bdrv_create)(const char *filename, QEMUOptionParameter *options);
-    int (*bdrv_flush)(BlockDriverState *bs);
     int (*bdrv_is_allocated)(BlockDriverState *bs, int64_t sector_num,
                              int nb_sectors, int *pnum);
     int (*bdrv_set_key)(BlockDriverState *bs, const char *key);
@@ -76,13 +76,34 @@ struct BlockDriver {
         BlockDriverCompletionFunc *cb, void *opaque);
     BlockDriverAIOCB *(*bdrv_aio_flush)(BlockDriverState *bs,
         BlockDriverCompletionFunc *cb, void *opaque);
-    int (*bdrv_discard)(BlockDriverState *bs, int64_t sector_num,
-                        int nb_sectors);
+    BlockDriverAIOCB *(*bdrv_aio_discard)(BlockDriverState *bs,
+        int64_t sector_num, int nb_sectors,
+        BlockDriverCompletionFunc *cb, void *opaque);
 
     int coroutine_fn (*bdrv_co_readv)(BlockDriverState *bs,
         int64_t sector_num, int nb_sectors, QEMUIOVector *qiov);
     int coroutine_fn (*bdrv_co_writev)(BlockDriverState *bs,
         int64_t sector_num, int nb_sectors, QEMUIOVector *qiov);
+    int coroutine_fn (*bdrv_co_discard)(BlockDriverState *bs,
+        int64_t sector_num, int nb_sectors);
+
+    /*
+     * Invalidate any cached meta-data.
+     */
+    void (*bdrv_invalidate_cache)(BlockDriverState *bs);
+
+    /*
+     * Flushes all data that was already written to the OS all the way down to
+     * the disk (for example raw-posix calls fsync()).
+     */
+    int coroutine_fn (*bdrv_co_flush_to_disk)(BlockDriverState *bs);
+
+    /*
+     * Flushes all internal caches to the OS. The data may still sit in a
+     * writeback cache of the host OS, but it will survive a crash of the qemu
+     * process.
+     */
+    int coroutine_fn (*bdrv_co_flush_to_os)(BlockDriverState *bs);
 
     int (*bdrv_aio_multiwrite)(BlockDriverState *bs, BlockRequest *reqs,
         int num_reqs);
@@ -199,6 +220,8 @@ struct BlockDriverState {
        drivers. They are not used by the block driver */
     int cyls, heads, secs, translation;
     BlockErrorAction on_read_error, on_write_error;
+    bool iostatus_enabled;
+    BlockDeviceIoStatus iostatus;
     char device_name[32];
     unsigned long *dirty_bitmap;
     int64_t dirty_count;
