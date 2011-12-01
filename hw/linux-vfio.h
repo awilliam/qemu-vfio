@@ -19,6 +19,7 @@
  * struct vfio_device_ops - VFIO bus driver device callbacks
  *
  * @match: Return true if buf describes the device
+ * @claim: Force driver to attach to device
  * @open: Called when userspace receives file descriptor for device
  * @release: Called when userspace releases file descriptor for device
  * @read: Perform read(2) on device file descriptor
@@ -29,6 +30,7 @@
  */
 struct vfio_device_ops {
 	bool	(*match)(struct device *dev, const char *buf);
+	int	(*claim)(struct device *dev);
 	int	(*open)(void *device_data);
 	void	(*release)(void *device_data);
 	ssize_t	(*read)(void *device_data, char __user *buf,
