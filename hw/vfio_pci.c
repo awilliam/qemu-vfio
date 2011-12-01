@@ -1123,7 +1123,7 @@ static VFIOGroup *vfio_get_group(unsigned int groupid)
 
         group = g_malloc0(sizeof(*group));
 
-        sprintf(path, "/dev/vfio/pci/%u", groupid);
+        sprintf(path, "/dev/vfio/pci:%u", groupid);
         group->fd = open(path, O_RDWR);
         if (group->fd < 0) {
             error_report("vfio: error opening %s: %s", path, strerror(errno));
