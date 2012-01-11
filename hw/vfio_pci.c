@@ -381,7 +381,7 @@ retry:
                     strerror(errno));
         } else if (ret != vdev->nr_vectors) {
             DPRINTF("%s(): Unable to allocate %d MSI vectors, retry with %d\n",
-                    ret);
+                    __FUNCTION__, fds->count, ret);
         }
         for (i = 0; i < vdev->nr_vectors; i++) {
             if (msix) {
@@ -758,13 +758,14 @@ static int vfio_setup_msi(VFIODevice *vdev)
         ctrl = le16_to_cpu(ctrl);
         table = le32_to_cpu(table);
 
-        vdev->msix = true;
-        vdev->msix_bar = table & PCI_MSIX_BIR;
-        vdev->msix_entries = (ctrl & PCI_MSIX_TABSIZE) + 1;
+        vdev->msix = g_malloc0(sizeof(*(vdev->msix)));
+        vdev->msix->bar = table & PCI_MSIX_BIR;
+        vdev->msix->offset = table & ~(MSIX_PAGE_SIZE - 1);
+        vdev->msix->entries = (ctrl & PCI_MSIX_TABSIZE) + 1;
 
         DPRINTF("%04x:%02x:%02x.%x PCI MSI-X CAP @0x%x, BAR %d, offset 0x%x\n",
                 vdev->host.seg, vdev->host.bus, vdev->host.dev,
-                vdev->host.func, pos, vdev->msix_bar, table & ~PCI_MSIX_BIR);
+                vdev->host.func, pos, vdev->msix->bar, table & ~PCI_MSIX_BIR);
     }
     return 0;
 }
@@ -772,12 +773,111 @@ static int vfio_setup_msi(VFIODevice *vdev)
 static void vfio_teardown_msi(VFIODevice *vdev)
 {
     msi_uninit(&vdev->pdev);
-    msix_uninit(&vdev->pdev, &vdev->resources[vdev->msix_bar].region);
+    msix_uninit(&vdev->pdev, &vdev->resources[vdev->msix->bar].region);
 }
 
 /*
  * Resource setup
  */
+static void vfio_unmap_region(VFIODevice *vdev, int bar)
+{
+    PCIResource *res = &vdev->resources[bar];
+
+    if (res->slow) {
+        memory_region_destroy(&res->region);
+    } else if (vdev->msix && vdev->msix->bar == bar) {
+        if (res->virtbase) {
+            memory_region_del_subregion(&res->region, &vdev->msix->region_lo);
+            munmap(res->virtbase, vdev->msix->offset);
+            memory_region_destroy(&vdev->msix->region_lo);
+        }
+
+        if (vdev->msix->virtbase) {
+            memory_region_del_subregion(&res->region, &vdev->msix->region_hi);
+            munmap(vdev->msix->virtbase,
+                   res->size - (vdev->msix->offset + MSIX_PAGE_SIZE));
+            memory_region_destroy(&vdev->msix->region_hi);
+        }
+
+        memory_region_destroy(&res->region);
+    } else {
+        memory_region_destroy(&res->region);
+        munmap(res->virtbase, res->size);
+    }
+}
+
+static void vfio_map_region(VFIODevice *vdev, int bar, char *name)
+{
+    PCIResource *res = &vdev->resources[bar];
+
+    if (res->size & 0xfff) {
+        goto slow;
+    }
+
+    if (!vdev->msix || vdev->msix->bar != bar) {
+        res->virtbase = mmap(NULL, res->size, PROT_READ | PROT_WRITE,
+                             MAP_SHARED, vdev->fd, res->offset);
+        if (res->virtbase == MAP_FAILED) {
+            goto slow;
+        }
+
+        memory_region_init_ram_ptr(&res->region, &vdev->pdev.qdev,
+                                   name, res->size, res->virtbase);
+        return; /* Done */
+    }
+
+    memory_region_init(&res->region, name, res->size);
+
+    if (vdev->msix->offset) {
+        res->virtbase = mmap(NULL, vdev->msix->offset, PROT_READ | PROT_WRITE,
+                             MAP_SHARED, vdev->fd, res->offset);
+        if (res->virtbase == MAP_FAILED) {
+            memory_region_destroy(&res->region);
+            goto slow;
+        }
+
+        memory_region_init_ram_ptr(&vdev->msix->region_lo, &vdev->pdev.qdev,
+                                   "lo", vdev->msix->offset, res->virtbase);
+        memory_region_add_subregion(&res->region, 0, &vdev->msix->region_lo);
+    }
+
+    if (res->size > vdev->msix->offset + MSIX_PAGE_SIZE) {
+        off_t offset = vdev->msix->offset + MSIX_PAGE_SIZE;
+        size_t size = res->size - offset;
+
+        vdev->msix->virtbase = mmap(NULL, size, PROT_READ | PROT_WRITE,
+                                    MAP_SHARED, vdev->fd, res->offset + offset);
+        if (vdev->msix->virtbase == MAP_FAILED) {
+            if (res->virtbase) {
+                memory_region_del_subregion(&res->region,
+                                            &vdev->msix->region_lo);
+                munmap(res->virtbase, vdev->msix->offset);
+                memory_region_destroy(&vdev->msix->region_lo);
+            }
+            memory_region_destroy(&res->region);
+            goto slow;
+        }
+
+        memory_region_init_ram_ptr(&vdev->msix->region_hi, &vdev->pdev.qdev,
+                                   "hi", size, vdev->msix->virtbase);
+        memory_region_add_subregion(&res->region, offset,
+                                    &vdev->msix->region_hi);
+    }
+
+    return; /* Done */
+
+slow:
+
+    res->slow = true;
+
+    DPRINTF("%s(%04x:%02x:%02x.%x) Using slow mapping for BAR %d\n",
+            __FUNCTION__, vdev->host.seg, vdev->host.bus,
+            vdev->host.dev, vdev->host.func, bar);
+
+    memory_region_init_io(&res->region, &vfio_resource_ops,
+                          res, name, res->size);
+}
+
 static int vfio_map_resources(VFIODevice *vdev)
 {
     int i;
@@ -819,43 +919,12 @@ static int vfio_map_resources(VFIODevice *vdev)
         if (space == PCI_BASE_ADDRESS_SPACE_MEMORY) {
             res->mem = true;
 
-            if ((res->size & 0xfff) == 0) {
-                /* Page aligned MMIO BARs - direct map */
-                res->virtbase = mmap(NULL, res->size, PROT_READ | PROT_WRITE,
-                                     MAP_SHARED, vdev->fd, res->offset);
+            vfio_map_region(vdev, i, name);
 
-                if (res->virtbase == MAP_FAILED) {
-                    fprintf(stderr, "vfio: Failed to mmap BAR %d (%s), "
-                            "using slow access instead\n", i, strerror(errno));
-                    goto slow;
-                }
-
-                memory_region_init_ram_ptr(&res->region, &vdev->pdev.qdev,
-                                           name, res->size, res->virtbase);
-            } else {
-                /* Non-page aligned MMIO - slow map */
-slow:
-                /* Note that we could still mmap and do reads/writes from the
-                 * mmap'd region in qemu.  For now we do pread/pwrite to
-                 * exercise that path in VFIO. */
-                res->slow = true;
-
-                DPRINTF("%s(%04x:%02x:%02x.%x) Using slow mapping for BAR %d\n",
-                        __FUNCTION__, vdev->host.seg, vdev->host.bus,
-                        vdev->host.dev, vdev->host.func, i);
-
-                memory_region_init_io(&res->region, &vfio_resource_ops,
-                                      res, name, res->size);
-            }
-
-            if (vdev->msix && vdev->msix_bar == i) {
-                if (msix_init(&vdev->pdev, vdev->msix_entries,
+            if (vdev->msix && vdev->msix->bar == i) {
+                if (msix_init(&vdev->pdev, vdev->msix->entries,
                               &res->region, i, res->size) < 0) {
-                    memory_region_destroy(&res->region);
-
-                    if (!res->slow) {
-                        munmap(res->virtbase, res->size);
-                    }
+                    vfio_unmap_region(vdev, i);
 
                     fprintf(stderr, "vfio: msix_init failed\n");
                     return -1;
@@ -890,10 +959,10 @@ static void vfio_unmap_resources(VFIODevice *vdev)
 
     for (i = 0; i < PCI_ROM_SLOT; i++, res++) {
         if (res->valid) {
-            memory_region_destroy(&res->region);
-
-            if (res->mem && !res->slow) {
-                munmap(res->virtbase, res->size);
+            if (res->mem) {
+                vfio_unmap_region(vdev, i);
+            } else {
+                memory_region_destroy(&res->region);
             }
             res->valid = false;
         }
@@ -1479,7 +1548,7 @@ static int vfio_initfn(struct PCIDevice *pdev)
     assert(pci_config_size(&vdev->pdev) <= vdev->config_size);
     ret = pread(vdev->fd, vdev->pdev.config,
                 pci_config_size(&vdev->pdev), vdev->config_offset);
-    if (ret < pci_config_size(&vdev->pdev)) {
+    if (ret < (int)pci_config_size(&vdev->pdev)) {
         fprintf(stderr, "vfio: Failed to read device config space\n");
         goto out;
     }

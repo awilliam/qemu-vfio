@@ -57,6 +57,15 @@ typedef struct VFIOIOMMU {
     QLIST_HEAD(, VFIOGroup) group_list;
 } VFIOIOMMU;
 
+typedef struct MSIXInfo {
+    uint8_t bar;
+    uint16_t entries;
+    uint32_t offset;
+    MemoryRegion region_lo;
+    MemoryRegion region_hi;
+    void *virtbase;
+} MSIXInfo;
+
 typedef struct VFIODevice {
     PCIDevice pdev;
     int fd;
@@ -67,6 +76,7 @@ typedef struct VFIODevice {
     off_t rom_offset;
     int msi_cap_size;
     MSIVector *msi_vectors;
+    MSIXInfo *msix;
     int nr_vectors;
     int interrupt;
     PCIResource resources[PCI_NUM_REGIONS - 1]; /* No ROM */
@@ -76,9 +86,6 @@ typedef struct VFIODevice {
     uint32_t flags;
     struct VFIOGroup *group;
     bool reset_works;
-    bool msix;
-    uint8_t msix_bar;
-    uint16_t msix_entries;
 } VFIODevice;
 
 typedef struct VFIOGroup {
