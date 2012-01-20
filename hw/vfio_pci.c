@@ -1,7 +1,7 @@
 /*
  * vfio based device assignment support
  *
- * Copyright Red Hat, Inc. 2011
+ * Copyright Red Hat, Inc. 2012
  *
  * Authors:
  *  Alex Williamson <alex.williamson@redhat.com>
@@ -159,15 +159,16 @@ static int print_hostaddr(DeviceState *qdev, Property *prop,
  */
 static inline void vfio_unmask_intx(VFIODevice *vdev)
 {
-    struct vfio_unmask_irq unmask =
+    struct vfio_irq_set irq_set =
         {
-            .argsz = sizeof(unmask),
-            .flags = 0,
+            .argsz = sizeof(irq_set),
+            .flags = VFIO_IRQ_SET_DATA_NONE | VFIO_IRQ_SET_ACTION_UNMASK,
             .index = VFIO_PCI_INTX_IRQ_INDEX,
-            .subindex = 0,
+            .start = 0,
+            .count = 1,
         };
 
-    ioctl(vdev->fd, VFIO_DEVICE_UNMASK_IRQ, &unmask);
+    ioctl(vdev->fd, VFIO_DEVICE_SET_IRQS, &irq_set);
 }
 
 static void vfio_intx_interrupt(void *opaque)
@@ -232,19 +233,22 @@ static void vfio_update_irq(Notifier *notify, void *data)
 
 static int vfio_enable_intx(VFIODevice *vdev)
 {
-    struct vfio_irq_eventfds *fds;
-    int argsz = sizeof(*fds) + sizeof(*(fds->eventfds));
+    struct vfio_irq_set *irq_set;
+    int32_t *fd;
+    int argsz = sizeof(*irq_set) + sizeof(*fd);
     uint8_t pin = vfio_pci_read_config(&vdev->pdev, PCI_INTERRUPT_PIN, 1);
 
     if (!pin) {
         return 0;
     }
 
-    fds = g_malloc(argsz);
-    fds->argsz = argsz;
-    fds->flags = 0;
-    fds->index = VFIO_PCI_INTX_IRQ_INDEX;
-    fds->count = 1;
+    irq_set = g_malloc(argsz);
+    irq_set->argsz = argsz;
+    irq_set->flags = VFIO_IRQ_SET_DATA_EVENTFD | VFIO_IRQ_SET_ACTION_TRIGGER;
+    irq_set->index = VFIO_PCI_INTX_IRQ_INDEX;
+    irq_set->start = 0;
+    irq_set->count = 1;
+    fd = (int32_t *)&irq_set->data;
 
     vfio_disable_interrupts(vdev);
 
@@ -258,28 +262,26 @@ static int vfio_enable_intx(VFIODevice *vdev)
 
     if (event_notifier_init(&vdev->intx.interrupt, 0)) {
         fprintf(stderr, "vfio: Error: event_notifier_init failed\n");
-        g_free(fds);
+        g_free(irq_set);
         return -1;
     }
 
-    fds->eventfds[0] = event_notifier_get_fd(&vdev->intx.interrupt);
-    qemu_set_fd_handler(fds->eventfds[0], vfio_intx_interrupt, NULL, vdev);
+    *fd = event_notifier_get_fd(&vdev->intx.interrupt);
+    qemu_set_fd_handler(*fd, vfio_intx_interrupt, NULL, vdev);
 
-    if (ioctl(vdev->fd, VFIO_DEVICE_SET_IRQ_EVENTFDS, fds)) {
+    if (ioctl(vdev->fd, VFIO_DEVICE_SET_IRQS, irq_set)) {
         fprintf(stderr, "vfio: Error: Failed to setup INTx fd %s\n",
                 strerror(errno));
-        g_free(fds);
+        g_free(irq_set);
         return -1;
     }
 
     vdev->interrupt = INT_INTx;
 
-    vfio_unmask_intx(vdev);
-
     DPRINTF("%s(%04x:%02x:%02x.%x)\n", __FUNCTION__, vdev->host.seg,
             vdev->host.bus, vdev->host.dev, vdev->host.func);
 
-    g_free(fds);
+    g_free(irq_set);
 
     return 0;
 }
@@ -287,15 +289,16 @@ static int vfio_enable_intx(VFIODevice *vdev)
 static void vfio_disable_intx(VFIODevice *vdev)
 {
     int fd;
-    struct vfio_irq_eventfds fds =
+    struct vfio_irq_set irq_set =
         {
-            .argsz = sizeof(fds),
-            .flags = 0,
+            .argsz = sizeof(irq_set),
+            .flags = VFIO_IRQ_SET_DATA_NONE | VFIO_IRQ_SET_ACTION_TRIGGER,
             .index = VFIO_PCI_INTX_IRQ_INDEX,
+            .start = 0,
             .count = 0,
         };
 
-    ioctl(vdev->fd, VFIO_DEVICE_SET_IRQ_EVENTFDS, &fds);
+    ioctl(vdev->fd, VFIO_DEVICE_SET_IRQS, &irq_set);
 
     pci_remove_irq_update_notifier(&vdev->pdev, &vdev->intx.update_irq);
     ioapic_remove_gsi_eoi_notifier(&vdev->intx.eoi, vdev->intx.irq);
@@ -336,8 +339,9 @@ static void vfio_msi_interrupt(void *opaque)
 
 static void vfio_enable_msi(VFIODevice *vdev, bool msix)
 {
-    struct vfio_irq_eventfds *fds;
+    struct vfio_irq_set *irq_set;
     int ret, i, argsz;
+    int32_t *fds;
 
     vfio_disable_interrupts(vdev);
 
@@ -346,12 +350,14 @@ static void vfio_enable_msi(VFIODevice *vdev, bool msix)
 retry:
     vdev->msi_vectors = g_malloc(vdev->nr_vectors * sizeof(MSIVector));
 
-    argsz = sizeof(*fds) + (vdev->nr_vectors * sizeof(*(fds->eventfds)));
-    fds = g_malloc(argsz);
-    fds->argsz = argsz;
-    fds->flags = 0;
-    fds->index = msix ? VFIO_PCI_MSIX_IRQ_INDEX : VFIO_PCI_MSI_IRQ_INDEX;
-    fds->count = vdev->nr_vectors;
+    argsz = sizeof(*irq_set) + (vdev->nr_vectors * sizeof(*fds));
+    irq_set = g_malloc(argsz);
+    irq_set->argsz = argsz;
+    irq_set->flags = VFIO_IRQ_SET_DATA_EVENTFD | VFIO_IRQ_SET_ACTION_TRIGGER;
+    irq_set->index = msix ? VFIO_PCI_MSIX_IRQ_INDEX : VFIO_PCI_MSI_IRQ_INDEX;
+    irq_set->start = 0;
+    irq_set->count = vdev->nr_vectors;
+    fds = (int32_t *)&irq_set->data;
 
     for (i = 0; i < vdev->nr_vectors; i++) {
         int fd;
@@ -367,30 +373,30 @@ retry:
         qemu_set_fd_handler(fd, vfio_msi_interrupt, NULL,
                             &vdev->msi_vectors[i]);
 
-        fds->eventfds[i] = fd;
+        fds[i] = fd;
 
         if (msix && msix_vector_use(&vdev->pdev, i) < 0) {
             fprintf(stderr, "vfio: Error msix_vector_use\n");
         }
     }
 
-    ret = ioctl(vdev->fd, VFIO_DEVICE_SET_IRQ_EVENTFDS, fds);
+    ret = ioctl(vdev->fd, VFIO_DEVICE_SET_IRQS, irq_set);
     if (ret) {
         if (ret < 0) {
             fprintf(stderr, "vfio: Error: Failed to setup MSI/X fds %s\n",
                     strerror(errno));
         } else if (ret != vdev->nr_vectors) {
             DPRINTF("%s(): Unable to allocate %d MSI vectors, retry with %d\n",
-                    __FUNCTION__, fds->count, ret);
+                    __FUNCTION__, irq_set->count, ret);
         }
         for (i = 0; i < vdev->nr_vectors; i++) {
             if (msix) {
                 msix_vector_unuse(&vdev->pdev, i);
             }
-            qemu_set_fd_handler(fds->eventfds[i], NULL, NULL, NULL);
+            qemu_set_fd_handler(fds[i], NULL, NULL, NULL);
             event_notifier_cleanup(&vdev->msi_vectors[i].interrupt);
         }
-        g_free(fds);
+        g_free(irq_set);
         g_free(vdev->msi_vectors);
         if (ret > 0 && ret != vdev->nr_vectors) {
             vdev->nr_vectors = ret;
@@ -403,7 +409,7 @@ retry:
 
     vdev->interrupt = msix ? INT_MSIX : INT_MSI;
 
-    g_free(fds);
+    g_free(irq_set);
 
     DPRINTF("%s(%04x:%02x:%02x.%x) Enabled %d vectors\n", __FUNCTION__,
             vdev->host.seg, vdev->host.bus, vdev->host.dev,
@@ -412,16 +418,17 @@ retry:
 
 static void vfio_disable_msi(VFIODevice *vdev, bool msix)
 {
-    struct vfio_irq_eventfds fds =
+    struct vfio_irq_set irq_set =
         {
-            .argsz = sizeof(fds),
-            .flags = 0,
+            .argsz = sizeof(irq_set),
+            .flags = VFIO_IRQ_SET_DATA_NONE | VFIO_IRQ_SET_ACTION_TRIGGER,
             .index = msix ? VFIO_PCI_MSIX_IRQ_INDEX : VFIO_PCI_MSI_IRQ_INDEX,
+            .start = 0,
             .count = 0,
         };
     int i;
 
-    ioctl(vdev->fd, VFIO_DEVICE_SET_IRQ_EVENTFDS, &fds);
+    ioctl(vdev->fd, VFIO_DEVICE_SET_IRQS, &irq_set);
 
     for (i = 0; i < vdev->nr_vectors; i++) {
         int fd = event_notifier_get_fd(&vdev->msi_vectors[i].interrupt);
@@ -1412,8 +1419,8 @@ static int vfio_group_new_iommu(VFIOGroup *group)
 
     /* XXX Eventually this may report the actual physical capabilities
      * of the IOMMU instead of 0 - ~0. */
-    if (info.iova_min || info.iova_max != ~info.iova_min ||
-        !(info.pgsize_bitmap & TARGET_PAGE_SIZE)) {
+    if (info.iova_start || info.iova_size != ~info.iova_start ||
+        !(info.iova_pgsizes & TARGET_PAGE_SIZE)) {
         error_report("vfio: iommu for group %u has unexpected properties\n",
                      group->groupid);
         close(group->iommu->fd);
