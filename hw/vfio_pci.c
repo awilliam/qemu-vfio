@@ -1199,7 +1199,7 @@ static int vfio_load_rom(VFIODevice *vdev)
 static QLIST_HEAD(, VFIOGroup)
     group_list = QLIST_HEAD_INITIALIZER(group_list);
 
-static VFIOGroup *vfio_get_group(unsigned int groupid)
+static VFIOGroup *vfio_get_group(int groupid)
 {
     VFIOGroup *group;
 
@@ -1215,7 +1215,7 @@ static VFIOGroup *vfio_get_group(unsigned int groupid)
 
         group = g_malloc0(sizeof(*group));
 
-        sprintf(path, "/dev/vfio/pci:%u", groupid);
+        sprintf(path, "/dev/vfio/%d", groupid);
         group->fd = open(path, O_RDWR);
         if (group->fd < 0) {
             error_report("vfio: error opening %s: %s", path, strerror(errno));
@@ -1232,14 +1232,14 @@ static VFIOGroup *vfio_get_group(unsigned int groupid)
         }
 
         if (!(info.flags & VFIO_GROUP_FLAGS_VIABLE)) {
-            error_report("vfio: error, group %u is not viable, please ensure all devices within the iommu_group are bound to their vfio bus driver.\n", groupid);
+            error_report("vfio: error, group %d is not viable, please ensure all devices within the iommu_group are bound to their vfio bus driver.\n", groupid);
             close(group->fd);
             g_free(group);
             return NULL;
         }
 
         if (info.flags & VFIO_GROUP_FLAGS_MM_LOCKED) {
-            error_report("vfio: error, group %u is already locked to another process.\n", groupid);
+            error_report("vfio: error, group %d is already locked to another process.\n", groupid);
             close(group->fd);
             g_free(group);
             return NULL;
@@ -1271,9 +1271,9 @@ static int __vfio_get_device(VFIOGroup *group,
 
     ret = ioctl(group->fd, VFIO_GROUP_GET_DEVICE_FD, name);
     if (ret < 0) {
-        error_report("vfio: error getting device %s from group %u: %s",
+        error_report("vfio: error getting device %s from group %d: %s",
                      name, group->groupid, strerror(errno));
-        error_report("Verify all devices in group %u "
+        error_report("Verify all devices in group %d "
                      "are bound to the vfio driver and not already in use",
                      group->groupid);
         return -1;
@@ -1405,7 +1405,7 @@ static int vfio_group_new_iommu(VFIOGroup *group)
     group->iommu = g_malloc0(sizeof(*(group->iommu)));
     group->iommu->fd = ioctl(group->fd, VFIO_GROUP_GET_IOMMU_FD);
     if (group->iommu->fd < 0) {
-        error_report("vfio: error getting iommu from group %u: %s",
+        error_report("vfio: error getting iommu from group %d: %s",
                      group->groupid, strerror(errno));
             return -1;
     }
@@ -1421,7 +1421,7 @@ static int vfio_group_new_iommu(VFIOGroup *group)
      * of the IOMMU instead of 0 - ~0. */
     if (info.iova_start || info.iova_size != ~info.iova_start ||
         !(info.iova_pgsizes & TARGET_PAGE_SIZE)) {
-        error_report("vfio: iommu for group %u has unexpected properties\n",
+        error_report("vfio: iommu for group %d has unexpected properties\n",
                      group->groupid);
         close(group->iommu->fd);
         g_free(group->iommu);
@@ -1462,10 +1462,10 @@ static int vfio_initfn(struct PCIDevice *pdev)
 {
     VFIODevice *pvdev, *vdev = DO_UPCAST(VFIODevice, pdev, pdev);
     VFIOGroup *group, *mgroup;
-    char path[64];
+    char path[PATH_MAX], iommu_group_path[PATH_MAX], *group_name;
+    ssize_t len;
     struct stat st;
-    FILE *iommu_group;
-    unsigned int groupid;
+    int groupid;
     int ret;
 
     /* Check that the host device exists */
@@ -1477,25 +1477,27 @@ static int vfio_initfn(struct PCIDevice *pdev)
     }
 
     strcat(path, "iommu_group");
-    iommu_group = fopen(path, "r");
-    if (!iommu_group) {
-        error_report("vfio: error opening %s: %s", path, strerror(errno));
+
+    len = readlink(path, iommu_group_path, PATH_MAX);
+    if (len <= 0) {
+        error_report("vfio: error no iommu_group for device\n");
         return -1;
     }
 
-    if (fscanf(iommu_group, "%u", &groupid) != 1) {
+    iommu_group_path[len] = 0;
+    group_name = basename(iommu_group_path);
+
+    if (sscanf(group_name, "%d", &groupid) != 1) {
         error_report("vfio: error reading %s: %s", path, strerror(errno));
         return -1;
     }
 
-    DPRINTF("%s(%04x:%02x:%02x.%x) group %u\n", __FUNCTION__, vdev->host.seg,
+    DPRINTF("%s(%04x:%02x:%02x.%x) group %d\n", __FUNCTION__, vdev->host.seg,
             vdev->host.bus, vdev->host.dev, vdev->host.func, groupid);
-
-    fclose(iommu_group);
 
     group = vfio_get_group(groupid);
     if (!group) {
-        error_report("vfio: failed to get group %u", groupid);
+        error_report("vfio: failed to get group %d", groupid);
         return -1;
     }
 
@@ -1535,18 +1537,18 @@ static int vfio_initfn(struct PCIDevice *pdev)
 
             ret = ioctl(mgroup->fd, VFIO_GROUP_MERGE, &group->fd);
             if (ret == 0) {
-                DPRINTF("%s() merged with group %u\n", __FUNCTION__,
+                DPRINTF("%s() merged with group %d\n", __FUNCTION__,
                         mgroup->groupid);
                 break;
             } else {
-                DPRINTF("%s() attempted merge with group %u: %s (%d)\n",
+                DPRINTF("%s() attempted merge with group %d: %s (%d)\n",
                         __FUNCTION__, mgroup->groupid, strerror(errno), errno);
             }
         }
 
         ret = __vfio_get_device(group, path, vdev);
         if (ret) {
-            error_report("vfio: error re-getting device %s from group %u",
+            error_report("vfio: error re-getting device %s from group %d",
                          path, groupid);
             vfio_put_group(group);
             return -1;

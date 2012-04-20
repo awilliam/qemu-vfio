@@ -90,7 +90,7 @@ typedef struct VFIODevice {
 
 typedef struct VFIOGroup {
     int fd;
-    unsigned int groupid;
+    int groupid;
     VFIOIOMMU *iommu;
     QLIST_HEAD(, VFIODevice) device_list;
     QLIST_ENTRY(VFIOGroup) group_next;
