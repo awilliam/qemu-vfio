@@ -51,11 +51,12 @@ enum {
 
 struct VFIOGroup;
 
-typedef struct VFIOIOMMU {
+typedef struct VFIOContainer {
     int fd;
     CPUPhysMemoryClient client;
     QLIST_HEAD(, VFIOGroup) group_list;
-} VFIOIOMMU;
+    QLIST_ENTRY(VFIOContainer) next;
+} VFIOContainer;
 
 typedef struct MSIXInfo {
     uint8_t bar;
@@ -81,7 +82,7 @@ typedef struct VFIODevice {
     int interrupt;
     PCIResource resources[PCI_NUM_REGIONS - 1]; /* No ROM */
     PCIHostDevice host;
-    QLIST_ENTRY(VFIODevice) group_next;
+    QLIST_ENTRY(VFIODevice) next;
     QEMUTimer *remove_timer;
     uint32_t flags;
     struct VFIOGroup *group;
@@ -91,17 +92,13 @@ typedef struct VFIODevice {
 typedef struct VFIOGroup {
     int fd;
     int groupid;
-    VFIOIOMMU *iommu;
+    VFIOContainer *container;
     QLIST_HEAD(, VFIODevice) device_list;
-    QLIST_ENTRY(VFIOGroup) group_next;
-    QLIST_ENTRY(VFIOGroup) iommu_next;
+    QLIST_ENTRY(VFIOGroup) next;
+    QLIST_ENTRY(VFIOGroup) container_next;
 } VFIOGroup;
 
-/* We can either create a domain per device or a domain per guest using
- * the uiommu interface.  By default we set this bit true to share an
- * iommu domain between devices for a guest.  This uses less resources
- * in the host and eliminates extra physical memory clients for us. */
-#define VFIO_FLAG_UIOMMU_SHARED_BIT 0
-#define VFIO_FLAG_UIOMMU_SHARED (1U << VFIO_FLAG_UIOMMU_SHARED_BIT)
+#define VFIO_FLAG_IOMMU_SHARED_BIT 0
+#define VFIO_FLAG_IOMMU_SHARED (1U << VFIO_FLAG_UIOMMU_SHARED_BIT)
 
 #endif /* __VFIO_H__ */

@@ -63,6 +63,12 @@
 #define MSIX_CAP_LENGTH 12
 #define MSIX_PAGE_SIZE 0x1000
 
+static QLIST_HEAD(, VFIOContainer)
+    container_list = QLIST_HEAD_INITIALIZER(container_list);
+
+static QLIST_HEAD(, VFIOGroup)
+    group_list = QLIST_HEAD_INITIALIZER(group_list);
+
 static void vfio_disable_interrupts(VFIODevice *vdev);
 static uint32_t vfio_pci_read_config(PCIDevice *pdev, uint32_t addr, int len);
 
@@ -597,10 +603,11 @@ static void vfio_pci_write_config(PCIDevice *pdev, uint32_t addr,
 /*
  * DMA
  */
-static int vfio_dma_map(VFIOIOMMU *iommu, target_phys_addr_t start_addr,
+static int vfio_dma_map(VFIOContainer *container,
+                        target_phys_addr_t start_addr,
                         ram_addr_t size, ram_addr_t phys_offset)
 {
-    struct vfio_dma_map map =
+    struct vfio_iommu_x86_dma_map map =
         {
             .argsz = sizeof(map),
             .flags = VFIO_DMA_MAP_FLAG_READ | VFIO_DMA_MAP_FLAG_WRITE,
@@ -609,7 +616,7 @@ static int vfio_dma_map(VFIOIOMMU *iommu, target_phys_addr_t start_addr,
             .size = size,
         };
 
-    if (ioctl(iommu->fd, VFIO_IOMMU_MAP_DMA, &map)) {
+    if (ioctl(container->fd, VFIO_IOMMU_MAP_DMA, &map)) {
         DPRINTF("VFIO_MAP_DMA: %d\n", errno);
         return -errno;
     }
@@ -617,10 +624,11 @@ static int vfio_dma_map(VFIOIOMMU *iommu, target_phys_addr_t start_addr,
     return 0;
 }
 
-static int vfio_dma_unmap(VFIOIOMMU *iommu, target_phys_addr_t start_addr,
+static int vfio_dma_unmap(VFIOContainer *container,
+                          target_phys_addr_t start_addr,
                           ram_addr_t size, ram_addr_t phys_offset)
 {
-    struct vfio_dma_unmap unmap =
+    struct vfio_iommu_x86_dma_unmap unmap =
         {
             .argsz = sizeof(unmap),
             .flags = 0,
@@ -628,7 +636,7 @@ static int vfio_dma_unmap(VFIOIOMMU *iommu, target_phys_addr_t start_addr,
             .size = size,
         };
 
-    if (ioctl(iommu->fd, VFIO_IOMMU_UNMAP_DMA, &unmap)) {
+    if (ioctl(container->fd, VFIO_IOMMU_UNMAP_DMA, &unmap)) {
         DPRINTF("VFIO_UNMAP_DMA: %d\n", errno);
         return -errno;
     }
@@ -641,7 +649,7 @@ static void vfio_client_set_memory(struct CPUPhysMemoryClient *client,
                                    ram_addr_t size, ram_addr_t phys_offset,
                                    bool log_dirty)
 {
-    VFIOIOMMU *iommu = container_of(client, VFIOIOMMU, client);
+    VFIOContainer *container = container_of(client, VFIOContainer, client);
     ram_addr_t flags = phys_offset & ~TARGET_PAGE_MASK;
     int ret;
 
@@ -650,7 +658,7 @@ static void vfio_client_set_memory(struct CPUPhysMemoryClient *client,
     }
 
     if (flags == IO_MEM_RAM) {
-        ret = vfio_dma_map(iommu, start_addr, size, phys_offset);
+        ret = vfio_dma_map(container, start_addr, size, phys_offset);
         if (!ret) {
             return;
         }
@@ -668,8 +676,8 @@ static void vfio_client_set_memory(struct CPUPhysMemoryClient *client,
                 ram_addr_t phys = cpu_get_physical_page_desc(curr);
 
                 if (phys != curr_phys) {
-                    vfio_dma_unmap(iommu, curr, TARGET_PAGE_SIZE, phys);
-                    ret = vfio_dma_map(iommu, curr,
+                    vfio_dma_unmap(container, curr, TARGET_PAGE_SIZE, phys);
+                    ret = vfio_dma_map(container, curr,
                                        TARGET_PAGE_SIZE, curr_phys);
                     if (ret) {
                         break;
@@ -684,7 +692,7 @@ static void vfio_client_set_memory(struct CPUPhysMemoryClient *client,
             }
         }
 
-        vfio_dma_unmap(iommu, start_addr, size, phys_offset);
+        vfio_dma_unmap(container, start_addr, size, phys_offset);
 
         fprintf(stderr, "%s: "
                 "Failed to map region %llx - %llx: %s\n", __FUNCTION__,
@@ -693,7 +701,7 @@ static void vfio_client_set_memory(struct CPUPhysMemoryClient *client,
                 strerror(-ret));
 
     } else if (flags == IO_MEM_UNASSIGNED) {
-        ret = vfio_dma_unmap(iommu, start_addr, size, phys_offset);
+        ret = vfio_dma_unmap(container, start_addr, size, phys_offset);
         if (!ret) {
             return;
         }
@@ -1196,59 +1204,151 @@ static int vfio_load_rom(VFIODevice *vdev)
     return 0;
 }
 
-static QLIST_HEAD(, VFIOGroup)
-    group_list = QLIST_HEAD_INITIALIZER(group_list);
+static int vfio_connect_container(VFIOGroup *group, bool prefer_shared)
+{
+    VFIOContainer *container;
+    int ret, fd;
+
+    if (group->container) {
+        return 0;
+    }
+
+    if (prefer_shared) {
+        QLIST_FOREACH(container, &container_list, next) {
+            if (!ioctl(group->fd, VFIO_GROUP_SET_CONTAINER, &container->fd)) {
+                group->container = container;
+                QLIST_INSERT_HEAD(&container->group_list, group,
+                                  container_next);
+                return 0;
+            }
+        }
+    }
+
+    fd = open("/dev/vfio/vfio", O_RDWR);
+    if (fd < 0) {
+        error_report("vfio: failed to open /dev/vfio/vfio: %s\n",
+                     strerror(errno));
+        return -1;
+    }
+
+    ret = ioctl(fd, VFIO_GET_API_VERSION);
+    if (ret != VFIO_API_VERSION) {
+        error_report("vfio: supported vfio version: %d, "
+                     "reported version: %d\n", VFIO_API_VERSION, ret);
+        close(fd);
+        return -1;
+    }
+
+    ret = ioctl(fd, VFIO_CHECK_EXTENSION, VFIO_X86_IOMMU);
+    if (!ret) {
+        error_report("vfio: no support for require iommu model\n");
+        close(fd);
+        return -1;
+    }
+
+    ret = ioctl(group->fd, VFIO_GROUP_SET_CONTAINER, &fd);
+    if (ret) {
+        error_report("vfio: failed to set group container: %s\n",
+                     strerror(errno));
+        close(fd);
+        return -1;
+    }
+
+    ret = ioctl(fd, VFIO_SET_IOMMU, VFIO_X86_IOMMU);
+    if (ret) {
+        error_report("vfio: failed to set iommu for container: %s\n",
+                     strerror(errno));
+        close(fd);
+        return -1;
+    }
+
+    container = g_malloc0(sizeof(*container));
+    container->fd = fd;
+    container->client.set_memory = vfio_client_set_memory;
+    container->client.sync_dirty_bitmap = vfio_client_sync_dirty_bitmap;
+    container->client.migration_log = vfio_client_migration_log;
+    QLIST_INIT(&container->group_list);
+    QLIST_INSERT_HEAD(&container_list, container, next);
+
+    group->container = container;
+    QLIST_INSERT_HEAD(&container->group_list, group, container_next);
+
+    cpu_register_phys_memory_client(&container->client);
+
+    return 0;
+}
+
+static void vfio_disconnect_container(VFIOGroup *group)
+{
+    VFIOContainer *container = group->container;
+
+    if (ioctl(group->fd, VFIO_GROUP_UNSET_CONTAINER, &container->fd)) {
+        error_report("vfio: error disconnecting group %d from container\n",
+                     group->groupid);
+    }
+
+    QLIST_REMOVE(group, container_next);
+    group->container = NULL;
+
+    if (QLIST_EMPTY(&container->group_list)) {
+        cpu_unregister_phys_memory_client(&container->client);
+        QLIST_REMOVE(container, next);
+        DPRINTF("vfio_disconnect_container: close container->fd\n");
+        close(container->fd);
+        g_free(container);
+    }
+}
 
 static VFIOGroup *vfio_get_group(int groupid)
 {
     VFIOGroup *group;
+    char path[32];
+    struct vfio_group_status status = { .argsz = sizeof(status) };
 
-    QLIST_FOREACH(group, &group_list, group_next) {
+    QLIST_FOREACH(group, &group_list, next) {
         if (group->groupid == groupid) {
-            break;
+            return group;
         }
     }
 
-    if (!group) {
-        char path[32];
-        struct vfio_group_info info = { .argsz = sizeof(info) };
+    group = g_malloc0(sizeof(*group));
 
-        group = g_malloc0(sizeof(*group));
-
-        sprintf(path, "/dev/vfio/%d", groupid);
-        group->fd = open(path, O_RDWR);
-        if (group->fd < 0) {
-            error_report("vfio: error opening %s: %s", path, strerror(errno));
-            g_free(group);
-            return NULL;
-        }
-
-        if (ioctl(group->fd, VFIO_GROUP_GET_INFO, &info)) {
-            error_report("vfio: error getting group info: %s\n",
-                         strerror(errno));
-            close(group->fd);
-            g_free(group);
-            return NULL;
-        }
-
-        if (!(info.flags & VFIO_GROUP_FLAGS_VIABLE)) {
-            error_report("vfio: error, group %d is not viable, please ensure all devices within the iommu_group are bound to their vfio bus driver.\n", groupid);
-            close(group->fd);
-            g_free(group);
-            return NULL;
-        }
-
-        if (info.flags & VFIO_GROUP_FLAGS_MM_LOCKED) {
-            error_report("vfio: error, group %d is already locked to another process.\n", groupid);
-            close(group->fd);
-            g_free(group);
-            return NULL;
-        }
-
-        group->groupid = groupid;
-        QLIST_INSERT_HEAD(&group_list, group, group_next);
-        QLIST_INIT(&group->device_list);
+    sprintf(path, "/dev/vfio/%d", groupid);
+    group->fd = open(path, O_RDWR);
+    if (group->fd < 0) {
+        error_report("vfio: error opening %s: %s", path, strerror(errno));
+        g_free(group);
+        return NULL;
     }
+
+    if (ioctl(group->fd, VFIO_GROUP_GET_STATUS, &status)) {
+        error_report("vfio: error getting group status: %s\n",
+                     strerror(errno));
+        close(group->fd);
+        g_free(group);
+        return NULL;
+    }
+
+    if (!(status.flags & VFIO_GROUP_FLAGS_VIABLE)) {
+        error_report("vfio: error, group %d is not viable, please ensure "
+                     "all devices within the iommu_group are bound to their "
+                     "vfio bus driver.\n", groupid);
+        close(group->fd);
+        g_free(group);
+        return NULL;
+    }
+
+    group->groupid = groupid;
+    QLIST_INIT(&group->device_list);
+
+    if (vfio_connect_container(group, true)) {
+        error_report("vfio: failed to setup container for group %d\n", groupid);
+        close(group->fd);
+        g_free(group);
+        return NULL;
+    }
+
+    QLIST_INSERT_HEAD(&group_list, group, next);
 
     return group;
 }
@@ -1259,7 +1359,9 @@ static void vfio_put_group(VFIOGroup *group)
         return;
     }
 
-    QLIST_REMOVE(group, group_next);
+    vfio_disconnect_container(group);
+    QLIST_REMOVE(group, next);
+    DPRINTF("vfio_put_group: close group->fd\n");
     close(group->fd);
     g_free(group);
 }
@@ -1280,7 +1382,7 @@ static int __vfio_get_device(VFIOGroup *group,
     }
 
     vdev->group = group;
-    QLIST_INSERT_HEAD(&group->device_list, vdev, group_next);
+    QLIST_INSERT_HEAD(&group->device_list, vdev, next);
 
     vdev->fd = ret;
 
@@ -1384,7 +1486,7 @@ static int vfio_get_device(VFIOGroup *group, const char *name, VFIODevice *vdev)
 
 error:
     if (ret) {
-        QLIST_REMOVE(vdev, group_next);
+        QLIST_REMOVE(vdev, next);
         vdev->group = NULL;
         close(vdev->fd);
     }
@@ -1393,75 +1495,16 @@ error:
 
 static void vfio_put_device(VFIODevice *vdev)
 {
-    QLIST_REMOVE(vdev, group_next);
+    QLIST_REMOVE(vdev, next);
     vdev->group = NULL;
+    DPRINTF("vfio_put_device: close vdev->fd\n");
     close(vdev->fd);
-}
-
-static int vfio_group_new_iommu(VFIOGroup *group)
-{
-    struct vfio_iommu_info info = { .argsz = sizeof(info) };
-
-    group->iommu = g_malloc0(sizeof(*(group->iommu)));
-    group->iommu->fd = ioctl(group->fd, VFIO_GROUP_GET_IOMMU_FD);
-    if (group->iommu->fd < 0) {
-        error_report("vfio: error getting iommu from group %d: %s",
-                     group->groupid, strerror(errno));
-            return -1;
-    }
-
-    if (ioctl(group->iommu->fd, VFIO_IOMMU_GET_INFO, &info)) {
-        error_report("vfio: error getting iommu flags: %s", strerror(errno));
-        close(group->iommu->fd);
-        g_free(group->iommu);
-        return -1;
-    }
-
-    /* XXX Eventually this may report the actual physical capabilities
-     * of the IOMMU instead of 0 - ~0. */
-    if (info.iova_start || info.iova_size != ~info.iova_start ||
-        !(info.iova_pgsizes & TARGET_PAGE_SIZE)) {
-        error_report("vfio: iommu for group %d has unexpected properties\n",
-                     group->groupid);
-        close(group->iommu->fd);
-        g_free(group->iommu);
-        return -1;
-    }
-
-    QLIST_INIT(&group->iommu->group_list);
-    QLIST_INSERT_HEAD(&group->iommu->group_list, group, iommu_next);
-
-    group->iommu->client.set_memory = vfio_client_set_memory;
-    group->iommu->client.sync_dirty_bitmap = vfio_client_sync_dirty_bitmap;
-    group->iommu->client.migration_log = vfio_client_migration_log;
-    cpu_register_phys_memory_client(&group->iommu->client);
-
-    return 0;
-}
-
-static void vfio_group_put_iommu(VFIOGroup *group)
-{
-    if (!QLIST_EMPTY(&group->device_list)) {
-        return;
-    }
-
-    QLIST_REMOVE(group, iommu_next);
-    if (QLIST_EMPTY(&group->iommu->group_list)) {
-        cpu_unregister_phys_memory_client(&group->iommu->client);
-        close(group->iommu->fd);
-    } else {
-        if (ioctl(group->fd, VFIO_GROUP_UNMERGE) != 0) {
-            error_report("vfio: Failed ot unmerge group: %s (%d)",
-                         strerror(errno), errno);
-        }
-    }
-    group->iommu = NULL;
 }
 
 static int vfio_initfn(struct PCIDevice *pdev)
 {
     VFIODevice *pvdev, *vdev = DO_UPCAST(VFIODevice, pdev, pdev);
-    VFIOGroup *group, *mgroup;
+    VFIOGroup *group;
     char path[PATH_MAX], iommu_group_path[PATH_MAX], *group_name;
     ssize_t len;
     struct stat st;
@@ -1504,7 +1547,7 @@ static int vfio_initfn(struct PCIDevice *pdev)
     sprintf(path, "%04x:%02x:%02x.%01x",
             vdev->host.seg, vdev->host.bus, vdev->host.dev, vdev->host.func);
 
-    QLIST_FOREACH(pvdev, &group->device_list, group_next) {
+    QLIST_FOREACH(pvdev, &group->device_list, next) {
         if (pvdev->host.seg == vdev->host.seg &&
             pvdev->host.bus == vdev->host.bus &&
             pvdev->host.dev == vdev->host.dev &&
@@ -1521,52 +1564,6 @@ static int vfio_initfn(struct PCIDevice *pdev)
         error_report("vfio: failed to get device %s", path);
         vfio_put_group(group);
         return -1;
-    }
-
-    assert(QLIST_FIRST(&group->device_list) == vdev);
-
-    /* If this is the only device in the group and there are other
-     * groups, try to merge. */
-    if (!QLIST_NEXT(QLIST_FIRST(&group->device_list), group_next)) {
-        vfio_put_device(vdev);
-
-        QLIST_FOREACH(mgroup, &group_list, group_next) {
-            if (mgroup == group) {
-                continue;
-            }
-
-            ret = ioctl(mgroup->fd, VFIO_GROUP_MERGE, &group->fd);
-            if (ret == 0) {
-                DPRINTF("%s() merged with group %d\n", __FUNCTION__,
-                        mgroup->groupid);
-                break;
-            } else {
-                DPRINTF("%s() attempted merge with group %d: %s (%d)\n",
-                        __FUNCTION__, mgroup->groupid, strerror(errno), errno);
-            }
-        }
-
-        ret = __vfio_get_device(group, path, vdev);
-        if (ret) {
-            error_report("vfio: error re-getting device %s from group %d",
-                         path, groupid);
-            vfio_put_group(group);
-            return -1;
-        }
-
-        if (mgroup) {
-            group->iommu = mgroup->iommu;
-            QLIST_INSERT_HEAD(&group->iommu->group_list, group, iommu_next);
-        }
-    }
-
-    if (!group->iommu) {
-        ret = vfio_group_new_iommu(group);
-        if (ret) {
-            vfio_put_device(vdev);
-            vfio_put_group(group);
-            return -1;
-        }
     }
 
     /* Get a copy of config space */
@@ -1613,7 +1610,6 @@ out_disable_netlink:
 #endif
 out:
     vfio_put_device(vdev);
-    vfio_group_put_iommu(group);
     vfio_put_group(group);
     return -1;
 }
@@ -1630,7 +1626,6 @@ static int vfio_exitfn(struct PCIDevice *pdev)
     vfio_unregister_netlink(vdev);
 #endif
     vfio_put_device(vdev);
-    vfio_group_put_iommu(group);
     vfio_put_group(group);
     return 0;
 }
@@ -1671,7 +1666,9 @@ static PCIDeviceInfo vfio_info = {
     .qdev.props   = (Property[]) {
         DEFINE_PROP("host", VFIODevice, host,
                     qdev_prop_hostaddr, PCIHostDevice),
+        //TODO - support passed fds
         //DEFINE_PROP_STRING("vfiofd", VFIODevice, vfiofd_name),
+        //DEFINE_PROP_STRING("vfiogroupfd, VFIODevice, vfiogroupfd_name),
         DEFINE_PROP_END_OF_LIST(),
     },
 };
