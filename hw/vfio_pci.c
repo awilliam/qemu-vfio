@@ -521,6 +521,7 @@ static uint32_t vfio_pci_read_config(PCIDevice *pdev, uint32_t addr, int len)
                     strerror(errno));
             return -1;
         }
+        val = le32_to_cpu(val);
     }
 
     /* Multifunction bit is virualized in qemu */
@@ -548,13 +549,14 @@ static void vfio_pci_write_config(PCIDevice *pdev, uint32_t addr,
                                   uint32_t val, int len)
 {
     VFIODevice *vdev = DO_UPCAST(VFIODevice, pdev, pdev);
+    uint32_t val_le = cpu_to_le32(val);
 
     DPRINTF("%s(%04x:%02x:%02x.%x, 0x%x, 0x%x, 0x%x)\n", __FUNCTION__,
             vdev->host.seg, vdev->host.bus, vdev->host.dev,
             vdev->host.func, addr, val, len);
 
     /* Write everything to VFIO, let it filter out what we can't write */
-    if (pwrite(vdev->fd, &val, len, vdev->config_offset + addr) != len) {
+    if (pwrite(vdev->fd, &val_le, len, vdev->config_offset + addr) != len) {
         fprintf(stderr, "%s(%04x:%02x:%02x.%x, 0x%x, 0x%x, 0x%x) failed: %s\n",
                 __FUNCTION__, vdev->host.seg, vdev->host.bus, vdev->host.dev,
                 vdev->host.func, addr, val, len, strerror(errno));
@@ -756,6 +758,7 @@ static int vfio_setup_msi(VFIODevice *vdev)
                   vdev->config_offset + pos + PCI_CAP_FLAGS) != sizeof(ctrl)) {
             return -1;
         }
+        ctrl = le16_to_cpu(ctrl);
 
         msi_64bit = !!(ctrl & PCI_MSI_FLAGS_64BIT);
         msi_maskbit = !!(ctrl & PCI_MSI_FLAGS_MASKBIT);
