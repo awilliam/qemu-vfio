@@ -7,6 +7,8 @@
  * This work is licensed under the terms of the GNU GPL, version 2.  See
  * the COPYING file in the top-level directory.
  *
+ * Contributions after 2012-01-13 are licensed under the terms of the
+ * GNU GPL, version 2 or (at your option) any later version.
  */
 
 #include <inttypes.h>
@@ -42,6 +44,13 @@
  * leading "\".
  */
 
+/* rbd_aio_discard added in 0.1.2 */
+#if LIBRBD_VERSION_CODE >= LIBRBD_VERSION(0, 1, 2)
+#define LIBRBD_SUPPORTS_DISCARD
+#else
+#undef LIBRBD_SUPPORTS_DISCARD
+#endif
+
 #define OBJ_MAX_SIZE (1UL << OBJ_DEFAULT_OBJ_ORDER)
 
 #define RBD_MAX_CONF_NAME_SIZE 128
@@ -51,13 +60,19 @@
 #define RBD_MAX_SNAP_NAME_SIZE 128
 #define RBD_MAX_SNAPS 100
 
+typedef enum {
+    RBD_AIO_READ,
+    RBD_AIO_WRITE,
+    RBD_AIO_DISCARD
+} RBDAIOCmd;
+
 typedef struct RBDAIOCB {
     BlockDriverAIOCB common;
     QEMUBH *bh;
     int ret;
     QEMUIOVector *qiov;
     char *bounce;
-    int write;
+    RBDAIOCmd cmd;
     int64_t sector_num;
     int error;
     struct BDRVRBDState *s;
@@ -369,7 +384,8 @@ static void qemu_rbd_complete_aio(RADOSCB *rcb)
 
     r = rcb->ret;
 
-    if (acb->write) {
+    if (acb->cmd == RBD_AIO_WRITE ||
+        acb->cmd == RBD_AIO_DISCARD) {
         if (r < 0) {
             acb->ret = r;
             acb->error = 1;
@@ -502,7 +518,7 @@ static int qemu_rbd_open(BlockDriverState *bs, const char *filename, int flags)
     fcntl(s->fds[0], F_SETFL, O_NONBLOCK);
     fcntl(s->fds[1], F_SETFL, O_NONBLOCK);
     qemu_aio_set_fd_handler(s->fds[RBD_FD_READ], qemu_rbd_aio_event_reader,
-                            NULL, qemu_rbd_aio_flush_cb, NULL, s);
+                            NULL, qemu_rbd_aio_flush_cb, s);
 
 
     return 0;
@@ -523,8 +539,7 @@ static void qemu_rbd_close(BlockDriverState *bs)
 
     close(s->fds[0]);
     close(s->fds[1]);
-    qemu_aio_set_fd_handler(s->fds[RBD_FD_READ], NULL , NULL, NULL, NULL,
-        NULL);
+    qemu_aio_set_fd_handler(s->fds[RBD_FD_READ], NULL, NULL, NULL, NULL);
 
     rbd_close(s->image);
     rados_ioctx_destroy(s->io_ctx);
@@ -604,7 +619,7 @@ static void rbd_aio_bh_cb(void *opaque)
 {
     RBDAIOCB *acb = opaque;
 
-    if (!acb->write) {
+    if (acb->cmd == RBD_AIO_READ) {
         qemu_iovec_from_buffer(acb->qiov, acb->bounce, acb->qiov->size);
     }
     qemu_vfree(acb->bounce);
@@ -615,12 +630,25 @@ static void rbd_aio_bh_cb(void *opaque)
     qemu_aio_release(acb);
 }
 
-static BlockDriverAIOCB *rbd_aio_rw_vector(BlockDriverState *bs,
-                                           int64_t sector_num,
-                                           QEMUIOVector *qiov,
-                                           int nb_sectors,
-                                           BlockDriverCompletionFunc *cb,
-                                           void *opaque, int write)
+static int rbd_aio_discard_wrapper(rbd_image_t image,
+                                   uint64_t off,
+                                   uint64_t len,
+                                   rbd_completion_t comp)
+{
+#ifdef LIBRBD_SUPPORTS_DISCARD
+    return rbd_aio_discard(image, off, len, comp);
+#else
+    return -ENOTSUP;
+#endif
+}
+
+static BlockDriverAIOCB *rbd_start_aio(BlockDriverState *bs,
+                                       int64_t sector_num,
+                                       QEMUIOVector *qiov,
+                                       int nb_sectors,
+                                       BlockDriverCompletionFunc *cb,
+                                       void *opaque,
+                                       RBDAIOCmd cmd)
 {
     RBDAIOCB *acb;
     RADOSCB *rcb;
@@ -632,19 +660,20 @@ static BlockDriverAIOCB *rbd_aio_rw_vector(BlockDriverState *bs,
     BDRVRBDState *s = bs->opaque;
 
     acb = qemu_aio_get(&rbd_aio_pool, bs, cb, opaque);
-    if (!acb) {
-        return NULL;
-    }
-    acb->write = write;
+    acb->cmd = cmd;
     acb->qiov = qiov;
-    acb->bounce = qemu_blockalign(bs, qiov->size);
+    if (cmd == RBD_AIO_DISCARD) {
+        acb->bounce = NULL;
+    } else {
+        acb->bounce = qemu_blockalign(bs, qiov->size);
+    }
     acb->ret = 0;
     acb->error = 0;
     acb->s = s;
     acb->cancelled = 0;
     acb->bh = NULL;
 
-    if (write) {
+    if (cmd == RBD_AIO_WRITE) {
         qemu_iovec_to_buffer(acb->qiov, acb->bounce);
     }
 
@@ -666,10 +695,18 @@ static BlockDriverAIOCB *rbd_aio_rw_vector(BlockDriverState *bs,
         goto failed;
     }
 
-    if (write) {
+    switch (cmd) {
+    case RBD_AIO_WRITE:
         r = rbd_aio_write(s->image, off, size, buf, c);
-    } else {
+        break;
+    case RBD_AIO_READ:
         r = rbd_aio_read(s->image, off, size, buf, c);
+        break;
+    case RBD_AIO_DISCARD:
+        r = rbd_aio_discard_wrapper(s->image, off, size, c);
+        break;
+    default:
+        r = -EINVAL;
     }
 
     if (r < 0) {
@@ -692,7 +729,8 @@ static BlockDriverAIOCB *qemu_rbd_aio_readv(BlockDriverState *bs,
                                             BlockDriverCompletionFunc *cb,
                                             void *opaque)
 {
-    return rbd_aio_rw_vector(bs, sector_num, qiov, nb_sectors, cb, opaque, 0);
+    return rbd_start_aio(bs, sector_num, qiov, nb_sectors, cb, opaque,
+                         RBD_AIO_READ);
 }
 
 static BlockDriverAIOCB *qemu_rbd_aio_writev(BlockDriverState *bs,
@@ -702,7 +740,8 @@ static BlockDriverAIOCB *qemu_rbd_aio_writev(BlockDriverState *bs,
                                              BlockDriverCompletionFunc *cb,
                                              void *opaque)
 {
-    return rbd_aio_rw_vector(bs, sector_num, qiov, nb_sectors, cb, opaque, 1);
+    return rbd_start_aio(bs, sector_num, qiov, nb_sectors, cb, opaque,
+                         RBD_AIO_WRITE);
 }
 
 static int qemu_rbd_co_flush(BlockDriverState *bs)
@@ -790,6 +829,26 @@ static int qemu_rbd_snap_create(BlockDriverState *bs,
     return 0;
 }
 
+static int qemu_rbd_snap_remove(BlockDriverState *bs,
+                                const char *snapshot_name)
+{
+    BDRVRBDState *s = bs->opaque;
+    int r;
+
+    r = rbd_snap_remove(s->image, snapshot_name);
+    return r;
+}
+
+static int qemu_rbd_snap_rollback(BlockDriverState *bs,
+                                  const char *snapshot_name)
+{
+    BDRVRBDState *s = bs->opaque;
+    int r;
+
+    r = rbd_snap_rollback(s->image, snapshot_name);
+    return r;
+}
+
 static int qemu_rbd_snap_list(BlockDriverState *bs,
                               QEMUSnapshotInfo **psn_tab)
 {
@@ -808,7 +867,7 @@ static int qemu_rbd_snap_list(BlockDriverState *bs,
     } while (snap_count == -ERANGE);
 
     if (snap_count <= 0) {
-        return snap_count;
+        goto done;
     }
 
     sn_tab = g_malloc0(snap_count * sizeof(QEMUSnapshotInfo));
@@ -827,9 +886,22 @@ static int qemu_rbd_snap_list(BlockDriverState *bs,
     }
     rbd_snap_list_end(snaps);
 
+ done:
     *psn_tab = sn_tab;
     return snap_count;
 }
+
+#ifdef LIBRBD_SUPPORTS_DISCARD
+static BlockDriverAIOCB* qemu_rbd_aio_discard(BlockDriverState *bs,
+                                              int64_t sector_num,
+                                              int nb_sectors,
+                                              BlockDriverCompletionFunc *cb,
+                                              void *opaque)
+{
+    return rbd_start_aio(bs, sector_num, NULL, nb_sectors, cb, opaque,
+                         RBD_AIO_DISCARD);
+}
+#endif
 
 static QEMUOptionParameter qemu_rbd_create_options[] = {
     {
@@ -861,8 +933,14 @@ static BlockDriver bdrv_rbd = {
     .bdrv_aio_writev        = qemu_rbd_aio_writev,
     .bdrv_co_flush_to_disk  = qemu_rbd_co_flush,
 
+#ifdef LIBRBD_SUPPORTS_DISCARD
+    .bdrv_aio_discard       = qemu_rbd_aio_discard,
+#endif
+
     .bdrv_snapshot_create   = qemu_rbd_snap_create,
+    .bdrv_snapshot_delete   = qemu_rbd_snap_remove,
     .bdrv_snapshot_list     = qemu_rbd_snap_list,
+    .bdrv_snapshot_goto     = qemu_rbd_snap_rollback,
 };
 
 static void bdrv_rbd_init(void)

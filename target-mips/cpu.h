@@ -7,20 +7,13 @@
 
 #define ELF_MACHINE	EM_MIPS
 
-#define CPUState struct CPUMIPSState
+#define CPUArchState struct CPUMIPSState
 
 #include "config.h"
 #include "qemu-common.h"
 #include "mips-defs.h"
 #include "cpu-defs.h"
 #include "softfloat.h"
-
-// uint_fast8_t and uint_fast16_t not in <sys/int_types.h>
-// XXX: move that elsewhere
-#if defined(CONFIG_SOLARIS) && CONFIG_SOLARIS_VERSION < 10
-typedef unsigned char           uint_fast8_t;
-typedef unsigned int            uint_fast16_t;
-#endif
 
 struct CPUMIPSState;
 
@@ -418,7 +411,7 @@ struct CPUMIPSState {
     /* We waste some space so we can handle shadow registers like TCs. */
     TCState tcs[MIPS_SHADOW_SET_MAX];
     CPUMIPSFPUContext fpus[MIPS_FPU_MAX];
-    /* Qemu */
+    /* QEMU */
     int error_code;
     uint32_t hflags;    /* CPU State */
     /* TMASK defines different execution modes */
@@ -483,6 +476,8 @@ struct CPUMIPSState {
     struct QEMUTimer *timer; /* Internal timer */
 };
 
+#include "cpu-qom.h"
+
 #if !defined(CONFIG_USER_ONLY)
 int no_mmu_map_address (CPUMIPSState *env, target_phys_addr_t *physical, int *prot,
                         target_ulong address, int rw, int access_type);
@@ -495,7 +490,7 @@ void r4k_helper_tlbwr (void);
 void r4k_helper_tlbp (void);
 void r4k_helper_tlbr (void);
 
-void cpu_unassigned_access(CPUState *env, target_phys_addr_t addr,
+void cpu_unassigned_access(CPUMIPSState *env, target_phys_addr_t addr,
                            int is_write, int is_exec, int unused, int size);
 #endif
 
@@ -515,12 +510,12 @@ void mips_cpu_list (FILE *f, fprintf_function cpu_fprintf);
 #define MMU_MODE1_SUFFIX _super
 #define MMU_MODE2_SUFFIX _user
 #define MMU_USER_IDX 2
-static inline int cpu_mmu_index (CPUState *env)
+static inline int cpu_mmu_index (CPUMIPSState *env)
 {
     return env->hflags & MIPS_HFLAG_KSU;
 }
 
-static inline void cpu_clone_regs(CPUState *env, target_ulong newsp)
+static inline void cpu_clone_regs(CPUMIPSState *env, target_ulong newsp)
 {
     if (newsp)
         env->active_tc.gpr[29] = newsp;
@@ -528,7 +523,7 @@ static inline void cpu_clone_regs(CPUState *env, target_ulong newsp)
     env->active_tc.gpr[2] = 0;
 }
 
-static inline int cpu_mips_hw_interrupts_pending(CPUState *env)
+static inline int cpu_mips_hw_interrupts_pending(CPUMIPSState *env)
 {
     int32_t pending;
     int32_t status;
@@ -632,32 +627,31 @@ enum {
 
 int cpu_mips_exec(CPUMIPSState *s);
 CPUMIPSState *cpu_mips_init(const char *cpu_model);
-//~ uint32_t cpu_mips_get_clock (void);
 int cpu_mips_signal_handler(int host_signum, void *pinfo, void *puc);
 
 /* mips_timer.c */
-uint32_t cpu_mips_get_random (CPUState *env);
-uint32_t cpu_mips_get_count (CPUState *env);
-void cpu_mips_store_count (CPUState *env, uint32_t value);
-void cpu_mips_store_compare (CPUState *env, uint32_t value);
-void cpu_mips_start_count(CPUState *env);
-void cpu_mips_stop_count(CPUState *env);
+uint32_t cpu_mips_get_random (CPUMIPSState *env);
+uint32_t cpu_mips_get_count (CPUMIPSState *env);
+void cpu_mips_store_count (CPUMIPSState *env, uint32_t value);
+void cpu_mips_store_compare (CPUMIPSState *env, uint32_t value);
+void cpu_mips_start_count(CPUMIPSState *env);
+void cpu_mips_stop_count(CPUMIPSState *env);
 
 /* mips_int.c */
-void cpu_mips_soft_irq(CPUState *env, int irq, int level);
+void cpu_mips_soft_irq(CPUMIPSState *env, int irq, int level);
 
 /* helper.c */
-int cpu_mips_handle_mmu_fault (CPUState *env, target_ulong address, int rw,
+int cpu_mips_handle_mmu_fault (CPUMIPSState *env, target_ulong address, int rw,
                                int mmu_idx);
 #define cpu_handle_mmu_fault cpu_mips_handle_mmu_fault
-void do_interrupt (CPUState *env);
+void do_interrupt (CPUMIPSState *env);
 #if !defined(CONFIG_USER_ONLY)
-void r4k_invalidate_tlb (CPUState *env, int idx, int use_extra);
-target_phys_addr_t cpu_mips_translate_address (CPUState *env, target_ulong address,
+void r4k_invalidate_tlb (CPUMIPSState *env, int idx, int use_extra);
+target_phys_addr_t cpu_mips_translate_address (CPUMIPSState *env, target_ulong address,
 		                               int rw);
 #endif
 
-static inline void cpu_get_tb_cpu_state(CPUState *env, target_ulong *pc,
+static inline void cpu_get_tb_cpu_state(CPUMIPSState *env, target_ulong *pc,
                                         target_ulong *cs_base, int *flags)
 {
     *pc = env->active_tc.PC;
@@ -665,12 +659,12 @@ static inline void cpu_get_tb_cpu_state(CPUState *env, target_ulong *pc,
     *flags = env->hflags & (MIPS_HFLAG_TMASK | MIPS_HFLAG_BMASK);
 }
 
-static inline void cpu_set_tls(CPUState *env, target_ulong newtls)
+static inline void cpu_set_tls(CPUMIPSState *env, target_ulong newtls)
 {
     env->tls_value = newtls;
 }
 
-static inline int mips_vpe_active(CPUState *env)
+static inline int mips_vpe_active(CPUMIPSState *env)
 {
     int active = 1;
 
@@ -678,7 +672,7 @@ static inline int mips_vpe_active(CPUState *env)
     if (!(env->mvp->CP0_MVPControl & (1 << CP0MVPCo_EVP))) {
         active = 0;
     }
-    /* Check that the VPE is actived.  */
+    /* Check that the VPE is activated.  */
     if (!(env->CP0_VPEConf0 & (1 << CP0VPEC0_VPA))) {
         active = 0;
     }
@@ -701,7 +695,7 @@ static inline int mips_vpe_active(CPUState *env)
     return active;
 }
 
-static inline int cpu_has_work(CPUState *env)
+static inline int cpu_has_work(CPUMIPSState *env)
 {
     int has_work = 0;
 
@@ -730,7 +724,7 @@ static inline int cpu_has_work(CPUState *env)
 
 #include "exec-all.h"
 
-static inline void cpu_pc_from_tb(CPUState *env, TranslationBlock *tb)
+static inline void cpu_pc_from_tb(CPUMIPSState *env, TranslationBlock *tb)
 {
     env->active_tc.PC = tb->pc;
     env->hflags &= ~MIPS_HFLAG_BMASK;

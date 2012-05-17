@@ -61,9 +61,9 @@
 #define MAX_BLK_DEVS                    10
 
 static VirtIOS390Bus *s390_bus;
-static CPUState **ipi_states;
+static CPUS390XState **ipi_states;
 
-CPUState *s390_cpu_addr2state(uint16_t cpu_addr)
+CPUS390XState *s390_cpu_addr2state(uint16_t cpu_addr)
 {
     if (cpu_addr >= smp_cpus) {
         return NULL;
@@ -72,7 +72,7 @@ CPUState *s390_cpu_addr2state(uint16_t cpu_addr)
     return ipi_states[cpu_addr];
 }
 
-int s390_virtio_hypercall(CPUState *env, uint64_t mem, uint64_t hypercall)
+int s390_virtio_hypercall(CPUS390XState *env, uint64_t mem, uint64_t hypercall)
 {
     int r = 0, i;
 
@@ -99,6 +99,7 @@ int s390_virtio_hypercall(CPUState *env, uint64_t mem, uint64_t hypercall)
         virtio_reset(dev->vdev);
         stb_phys(dev->dev_offs + VIRTIO_DEV_OFFS_STATUS, 0);
         s390_virtio_device_sync(dev);
+        s390_virtio_reset_idx(dev);
         break;
     }
     case KVM_S390_VIRTIO_SET_STATUS:
@@ -129,7 +130,7 @@ int s390_virtio_hypercall(CPUState *env, uint64_t mem, uint64_t hypercall)
  */
 static unsigned s390_running_cpus;
 
-void s390_add_running_cpu(CPUState *env)
+void s390_add_running_cpu(CPUS390XState *env)
 {
     if (env->halted) {
         s390_running_cpus++;
@@ -138,7 +139,7 @@ void s390_add_running_cpu(CPUState *env)
     }
 }
 
-unsigned s390_del_running_cpu(CPUState *env)
+unsigned s390_del_running_cpu(CPUS390XState *env)
 {
     if (env->halted == 0) {
         assert(s390_running_cpus >= 1);
@@ -157,7 +158,7 @@ static void s390_init(ram_addr_t my_ram_size,
                       const char *initrd_filename,
                       const char *cpu_model)
 {
-    CPUState *env = NULL;
+    CPUS390XState *env = NULL;
     MemoryRegion *sysmem = get_system_memory();
     MemoryRegion *ram = g_new(MemoryRegion, 1);
     ram_addr_t kernel_size = 0;
@@ -184,7 +185,8 @@ static void s390_init(ram_addr_t my_ram_size,
     s390_bus = s390_virtio_bus_init(&my_ram_size);
 
     /* allocate RAM */
-    memory_region_init_ram(ram, NULL, "s390.ram", my_ram_size);
+    memory_region_init_ram(ram, "s390.ram", my_ram_size);
+    vmstate_register_ram_global(ram);
     memory_region_add_subregion(sysmem, 0, ram);
 
     /* clear virtio region */
@@ -204,10 +206,10 @@ static void s390_init(ram_addr_t my_ram_size,
         cpu_model = "host";
     }
 
-    ipi_states = g_malloc(sizeof(CPUState *) * smp_cpus);
+    ipi_states = g_malloc(sizeof(CPUS390XState *) * smp_cpus);
 
     for (i = 0; i < smp_cpus; i++) {
-        CPUState *tmp_env;
+        CPUS390XState *tmp_env;
 
         tmp_env = cpu_init(cpu_model);
         if (!env) {
@@ -223,13 +225,22 @@ static void s390_init(ram_addr_t my_ram_size,
     s390_add_running_cpu(env);
 
     if (kernel_filename) {
-        kernel_size = load_image(kernel_filename, qemu_get_ram_ptr(0));
 
-        if (lduw_be_phys(KERN_IMAGE_START) != 0x0dd0) {
-            fprintf(stderr, "Specified image is not an s390 boot image\n");
+        kernel_size = load_elf(kernel_filename, NULL, NULL, NULL, NULL,
+                               NULL, 1, ELF_MACHINE, 0);
+        if (kernel_size == -1UL) {
+            kernel_size = load_image_targphys(kernel_filename, 0, ram_size);
+        }
+        if (kernel_size == -1UL) {
+            fprintf(stderr, "qemu: could not load kernel '%s'\n",
+                    kernel_filename);
             exit(1);
         }
-
+        /*
+         * we can not rely on the ELF entry point, since up to 3.2 this
+         * value was 0x800 (the SALIPL loader) and it wont work. For
+         * all (Linux) cases 0x10000 (KERN_IMAGE_START) should be fine.
+         */
         env->psw.addr = KERN_IMAGE_START;
         env->psw.mask = 0x0000000180000000ULL;
     } else {
@@ -242,7 +253,7 @@ static void s390_init(ram_addr_t my_ram_size,
         }
 
         bios_filename = qemu_find_file(QEMU_FILE_TYPE_BIOS, bios_name);
-        bios_size = load_image(bios_filename, qemu_get_ram_ptr(ZIPL_LOAD_ADDR));
+        bios_size = load_image_targphys(bios_filename, ZIPL_LOAD_ADDR, 4096);
         g_free(bios_filename);
 
         if ((long)bios_size < 0) {
@@ -262,15 +273,23 @@ static void s390_init(ram_addr_t my_ram_size,
         while (kernel_size + 0x100000 > initrd_offset) {
             initrd_offset += 0x100000;
         }
-        initrd_size = load_image(initrd_filename, qemu_get_ram_ptr(initrd_offset));
+        initrd_size = load_image_targphys(initrd_filename, initrd_offset,
+                                          ram_size - initrd_offset);
+        if (initrd_size == -1UL) {
+            fprintf(stderr, "qemu: could not load initrd '%s'\n",
+                    initrd_filename);
+            exit(1);
+        }
 
-        stq_be_phys(INITRD_PARM_START, initrd_offset);
-        stq_be_phys(INITRD_PARM_SIZE, initrd_size);
+        /* we have to overwrite values in the kernel image, which are "rom" */
+        memcpy(rom_ptr(INITRD_PARM_START), &initrd_offset, 8);
+        memcpy(rom_ptr(INITRD_PARM_SIZE), &initrd_size, 8);
     }
 
-    if (kernel_cmdline) {
-        cpu_physical_memory_write(KERN_PARM_AREA, kernel_cmdline,
-                                  strlen(kernel_cmdline) + 1);
+    if (rom_ptr(KERN_PARM_AREA)) {
+        /* we have to overwrite values in the kernel image, which are "rom" */
+        memcpy(rom_ptr(KERN_PARM_AREA), kernel_cmdline,
+               strlen(kernel_cmdline) + 1);
     }
 
     /* Create VirtIO network adapters */
@@ -313,10 +332,12 @@ static QEMUMachine s390_machine = {
     .alias = "s390",
     .desc = "VirtIO based S390 machine",
     .init = s390_init,
+    .no_cdrom = 1,
+    .no_floppy = 1,
     .no_serial = 1,
     .no_parallel = 1,
+    .no_sdcard = 1,
     .use_virtcon = 1,
-    .no_vga = 1,
     .max_cpus = 255,
     .is_default = 1,
 };

@@ -25,11 +25,7 @@
 #ifndef QEMU_MAIN_LOOP_H
 #define QEMU_MAIN_LOOP_H 1
 
-#ifdef SIGRTMIN
-#define SIG_IPI (SIGRTMIN+4)
-#else
 #define SIG_IPI SIGUSR1
-#endif
 
 /**
  * qemu_init_main_loop: Set up the process so that it can run the main loop.
@@ -41,8 +37,20 @@
  * SIGUSR2, thread signals (SIGFPE, SIGILL, SIGSEGV, SIGBUS) and real-time
  * signals if available.  Remember that Windows in practice does not have
  * signals, though.
+ *
+ * In the case of QEMU tools, this will also start/initialize timers.
  */
 int qemu_init_main_loop(void);
+
+/**
+ * main_loop_init: Initializes main loop
+ *
+ * Internal (but shared for compatibility reasons) initialization routine
+ * for the main loop. This should not be used by applications directly,
+ * use qemu_init_main_loop() instead.
+ *
+ */
+int main_loop_init(void);
 
 /**
  * main_loop_wait: Run one iteration of the main loop.
@@ -111,7 +119,7 @@ typedef int PollingFunc(void *opaque);
  * qemu_add_wait_object.
  *
  * Polling callbacks really have nothing Windows specific in them, but
- * as they are a hack and are currenly not necessary under POSIX systems,
+ * as they are a hack and are currently not necessary under POSIX systems,
  * they are only available when QEMU is running under Windows.
  *
  * @func: The function that does the polling, and returns 1 to force
@@ -324,6 +332,9 @@ int qemu_add_child_watch(pid_t pid);
  * by threads other than the main loop thread when calling
  * qemu_bh_new(), qemu_set_fd_handler() and basically all other
  * functions documented in this file.
+ *
+ * NOTE: tools currently are single-threaded and qemu_mutex_lock_iothread
+ * is a no-op there.
  */
 void qemu_mutex_lock_iothread(void);
 
@@ -336,16 +347,20 @@ void qemu_mutex_lock_iothread(void);
  * as soon as possible by threads other than the main loop thread,
  * because it prevents the main loop from processing callbacks,
  * including timers and bottom halves.
+ *
+ * NOTE: tools currently are single-threaded and qemu_mutex_unlock_iothread
+ * is a no-op there.
  */
 void qemu_mutex_unlock_iothread(void);
 
 /* internal interfaces */
 
+void qemu_fd_register(int fd);
 void qemu_iohandler_fill(int *pnfds, fd_set *readfds, fd_set *writefds, fd_set *xfds);
 void qemu_iohandler_poll(fd_set *readfds, fd_set *writefds, fd_set *xfds, int rc);
 
 void qemu_bh_schedule_idle(QEMUBH *bh);
 int qemu_bh_poll(void);
-void qemu_bh_update_timeout(int *timeout);
+void qemu_bh_update_timeout(uint32_t *timeout);
 
 #endif

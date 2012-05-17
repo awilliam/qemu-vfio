@@ -1,8 +1,6 @@
 #ifndef QEMU_ARCH_INIT_H
 #define QEMU_ARCH_INIT_H
 
-extern const char arch_config_name[];
-
 enum {
     QEMU_ARCH_ALL = -1,
     QEMU_ARCH_ALPHA = 1,
@@ -27,7 +25,7 @@ void do_acpitable_option(const char *optarg);
 void do_smbios_option(const char *optarg);
 void cpudef_init(void);
 int audio_available(void);
-void audio_init(qemu_irq *isa_pic, PCIBus *pci_bus);
+void audio_init(ISABus *isa_bus, PCIBus *pci_bus);
 int tcg_available(void);
 int kvm_available(void);
 int xen_available(void);

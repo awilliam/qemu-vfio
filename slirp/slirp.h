@@ -15,12 +15,6 @@ typedef char *caddr_t;
 # include <sys/timeb.h>
 # include <iphlpapi.h>
 
-# define EWOULDBLOCK WSAEWOULDBLOCK
-# define EINPROGRESS WSAEINPROGRESS
-# define ENOTCONN WSAENOTCONN
-# define EHOSTUNREACH WSAEHOSTUNREACH
-# define ENETUNREACH WSAENETUNREACH
-# define ECONNREFUSED WSAECONNREFUSED
 #else
 # define ioctlsocket ioctl
 # define closesocket(s) close(s)
@@ -88,10 +82,6 @@ void *malloc(size_t arg);
 void free(void *ptr);
 #endif
 
-#ifndef HAVE_INET_ATON
-int inet_aton(const char *cp, struct in_addr *ia);
-#endif
-
 #include <fcntl.h>
 #ifndef NO_UNIX_SOCKETS
 #include <sys/un.h>
@@ -144,6 +134,7 @@ int inet_aton(const char *cp, struct in_addr *ia);
 #include "debug.h"
 
 #include "qemu-queue.h"
+#include "qemu_socket.h"
 
 #include "libslirp.h"
 #include "ip.h"
@@ -166,9 +157,6 @@ int inet_aton(const char *cp, struct in_addr *ia);
 
 #include "bootp.h"
 #include "tftp.h"
-
-/* osdep.c */
-int qemu_socket(int domain, int type, int protocol);
 
 #define ETH_ALEN 6
 #define ETH_HLEN 14
@@ -235,10 +223,10 @@ struct Slirp {
     int mbuf_alloced;
 
     /* if states */
-    int if_queued;          /* number of packets queued so far */
     struct mbuf if_fastq;   /* fast queue (for interactive data) */
     struct mbuf if_batchq;  /* queue for non-interactive data */
     struct mbuf *next_m;    /* pointer to next mbuf to output */
+    bool if_start_busy;     /* avoid if_start recursion */
 
     /* ip states */
     struct ipq ipq;         /* ip reass. queue */
@@ -315,6 +303,7 @@ void if_output(struct socket *, struct mbuf *);
 
 /* ip_input.c */
 void ip_init(Slirp *);
+void ip_cleanup(Slirp *);
 void ip_input(struct mbuf *);
 void ip_slowtimo(Slirp *);
 void ip_stripoptions(register struct mbuf *, struct mbuf *);
@@ -332,6 +321,7 @@ void tcp_setpersist(register struct tcpcb *);
 
 /* tcp_subr.c */
 void tcp_init(Slirp *);
+void tcp_cleanup(Slirp *);
 void tcp_template(struct tcpcb *);
 void tcp_respond(struct tcpcb *, register struct tcpiphdr *, register struct mbuf *, tcp_seq, tcp_seq, int);
 struct tcpcb * tcp_newtcpcb(struct socket *);

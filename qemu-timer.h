@@ -4,11 +4,9 @@
 #include "qemu-common.h"
 #include "main-loop.h"
 #include "notify.h"
-#include <time.h>
-#include <sys/time.h>
 
-#ifdef _WIN32
-#include <windows.h>
+#ifdef __FreeBSD__
+#include <sys/param.h>
 #endif
 
 /* timers */
@@ -42,7 +40,7 @@ int64_t qemu_get_clock_ns(QEMUClock *clock);
 int64_t qemu_clock_has_timers(QEMUClock *clock);
 int64_t qemu_clock_expired(QEMUClock *clock);
 int64_t qemu_clock_deadline(QEMUClock *clock);
-void qemu_clock_enable(QEMUClock *clock, int enabled);
+void qemu_clock_enable(QEMUClock *clock, bool enabled);
 void qemu_clock_warp(QEMUClock *clock);
 
 void qemu_register_clock_reset_notifier(QEMUClock *clock, Notifier *notifier);
@@ -55,14 +53,13 @@ void qemu_free_timer(QEMUTimer *ts);
 void qemu_del_timer(QEMUTimer *ts);
 void qemu_mod_timer_ns(QEMUTimer *ts, int64_t expire_time);
 void qemu_mod_timer(QEMUTimer *ts, int64_t expire_time);
-int qemu_timer_pending(QEMUTimer *ts);
-int qemu_timer_expired(QEMUTimer *timer_head, int64_t current_time);
+bool qemu_timer_pending(QEMUTimer *ts);
+bool qemu_timer_expired(QEMUTimer *timer_head, int64_t current_time);
 uint64_t qemu_timer_expire_time_ns(QEMUTimer *ts);
 
+void qemu_run_timers(QEMUClock *clock);
 void qemu_run_all_timers(void);
-int qemu_alarm_pending(void);
 void configure_alarms(char const *opt);
-int qemu_calculate_timeout(void);
 void init_clocks(void);
 int init_timer_alarm(void);
 
@@ -138,19 +135,6 @@ static inline int64_t get_clock(void)
 
 void qemu_get_timer(QEMUFile *f, QEMUTimer *ts);
 void qemu_put_timer(QEMUFile *f, QEMUTimer *ts);
-
-/* ptimer.c */
-typedef struct ptimer_state ptimer_state;
-typedef void (*ptimer_cb)(void *opaque);
-
-ptimer_state *ptimer_init(QEMUBH *bh);
-void ptimer_set_period(ptimer_state *s, int64_t period);
-void ptimer_set_freq(ptimer_state *s, uint32_t freq);
-void ptimer_set_limit(ptimer_state *s, uint64_t limit, int reload);
-uint64_t ptimer_get_count(ptimer_state *s);
-void ptimer_set_count(ptimer_state *s, uint64_t count);
-void ptimer_run(ptimer_state *s, int oneshot);
-void ptimer_stop(ptimer_state *s);
 
 /* icount */
 int64_t cpu_get_icount(void);

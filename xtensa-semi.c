@@ -31,7 +31,7 @@
 #include <stddef.h>
 #include "cpu.h"
 #include "dyngen-exec.h"
-#include "helpers.h"
+#include "helper.h"
 #include "qemu-log.h"
 
 enum {
@@ -55,7 +55,7 @@ enum {
     SELECT_ONE_EXCEPT = 3,
 };
 
-void HELPER(simcall)(CPUState *env)
+void HELPER(simcall)(CPUXtensaState *env)
 {
     uint32_t *regs = env->regs;
 

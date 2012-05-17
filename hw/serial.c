@@ -139,6 +139,7 @@ struct SerialState {
     int it_shift;
     int baudbase;
     int tsr_retry;
+    uint32_t wakeup;
 
     uint64_t last_xmit_ts;              /* Time when the last byte was successfully sent out of the tsr */
     SerialFIFO recv_fifo;
@@ -326,9 +327,12 @@ static void serial_xmit(void *opaque)
             s->tsr = fifo_get(s,XMIT_FIFO);
             if (!s->xmit_fifo.count)
                 s->lsr |= UART_LSR_THRE;
+        } else if ((s->lsr & UART_LSR_THRE)) {
+            return;
         } else {
             s->tsr = s->thr;
             s->lsr |= UART_LSR_THRE;
+            s->lsr &= ~UART_LSR_TEMT;
         }
     }
 
@@ -336,7 +340,7 @@ static void serial_xmit(void *opaque)
         /* in loopback mode, say that we just received a char */
         serial_receive1(s, &s->tsr, 1);
     } else if (qemu_chr_fe_write(s->chr, &s->tsr, 1) != 1) {
-        if ((s->tsr_retry > 0) && (s->tsr_retry <= MAX_XMIT_RETRY)) {
+        if ((s->tsr_retry >= 0) && (s->tsr_retry <= MAX_XMIT_RETRY)) {
             s->tsr_retry++;
             qemu_mod_timer(s->transmit_timer,  new_xmit_ts + s->char_transmit_time);
             return;
@@ -635,6 +639,10 @@ static int serial_can_receive1(void *opaque)
 static void serial_receive1(void *opaque, const uint8_t *buf, int size)
 {
     SerialState *s = opaque;
+
+    if (s->wakeup) {
+        qemu_system_wakeup_request(QEMU_WAKEUP_REASON_OTHER);
+    }
     if(s->fcr & UART_FCR_FE) {
         int i;
         for (i = 0; i < size; i++) {
@@ -879,23 +887,34 @@ SerialState *serial_mm_init(MemoryRegion *address_space,
     return s;
 }
 
-static ISADeviceInfo serial_isa_info = {
-    .qdev.name  = "isa-serial",
-    .qdev.size  = sizeof(ISASerialState),
-    .qdev.vmsd  = &vmstate_isa_serial,
-    .init       = serial_isa_initfn,
-    .qdev.props = (Property[]) {
-        DEFINE_PROP_UINT32("index", ISASerialState, index,   -1),
-        DEFINE_PROP_HEX32("iobase", ISASerialState, iobase,  -1),
-        DEFINE_PROP_UINT32("irq",   ISASerialState, isairq,  -1),
-        DEFINE_PROP_CHR("chardev",  ISASerialState, state.chr),
-        DEFINE_PROP_END_OF_LIST(),
-    },
+static Property serial_isa_properties[] = {
+    DEFINE_PROP_UINT32("index", ISASerialState, index,   -1),
+    DEFINE_PROP_HEX32("iobase", ISASerialState, iobase,  -1),
+    DEFINE_PROP_UINT32("irq",   ISASerialState, isairq,  -1),
+    DEFINE_PROP_CHR("chardev",  ISASerialState, state.chr),
+    DEFINE_PROP_UINT32("wakeup", ISASerialState, state.wakeup, 0),
+    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void serial_register_devices(void)
+static void serial_isa_class_initfn(ObjectClass *klass, void *data)
 {
-    isa_qdev_register(&serial_isa_info);
+    DeviceClass *dc = DEVICE_CLASS(klass);
+    ISADeviceClass *ic = ISA_DEVICE_CLASS(klass);
+    ic->init = serial_isa_initfn;
+    dc->vmsd = &vmstate_isa_serial;
+    dc->props = serial_isa_properties;
 }
 
-device_init(serial_register_devices)
+static TypeInfo serial_isa_info = {
+    .name          = "isa-serial",
+    .parent        = TYPE_ISA_DEVICE,
+    .instance_size = sizeof(ISASerialState),
+    .class_init    = serial_isa_class_initfn,
+};
+
+static void serial_register_types(void)
+{
+    type_register_static(&serial_isa_info);
+}
+
+type_init(serial_register_types)

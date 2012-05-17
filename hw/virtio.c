@@ -209,6 +209,10 @@ void virtio_queue_set_notification(VirtQueue *vq, int enable)
     } else {
         vring_used_flags_set_bit(vq, VRING_USED_F_NO_NOTIFY);
     }
+    if (enable) {
+        /* Expose avail event/used flags before caller checks the avail idx. */
+        smp_mb();
+    }
 }
 
 int virtio_queue_ready(VirtQueue *vq)
@@ -282,6 +286,11 @@ static int virtqueue_num_heads(VirtQueue *vq, unsigned int idx)
         error_report("Guest moved used index from %u to %u",
                      idx, vring_avail_idx(vq));
         exit(1);
+    }
+    /* On success, callers read a descriptor at vq->last_avail_idx.
+     * Make sure descriptor read does not bypass avail index read. */
+    if (num_heads) {
+        smp_rmb();
     }
 
     return num_heads;
@@ -539,7 +548,7 @@ uint32_t virtio_config_readb(VirtIODevice *vdev, uint32_t addr)
     if (addr > (vdev->config_len - sizeof(val)))
         return (uint32_t)-1;
 
-    memcpy(&val, vdev->config + addr, sizeof(val));
+    val = ldub_p(vdev->config + addr);
     return val;
 }
 
@@ -552,7 +561,7 @@ uint32_t virtio_config_readw(VirtIODevice *vdev, uint32_t addr)
     if (addr > (vdev->config_len - sizeof(val)))
         return (uint32_t)-1;
 
-    memcpy(&val, vdev->config + addr, sizeof(val));
+    val = lduw_p(vdev->config + addr);
     return val;
 }
 
@@ -565,7 +574,7 @@ uint32_t virtio_config_readl(VirtIODevice *vdev, uint32_t addr)
     if (addr > (vdev->config_len - sizeof(val)))
         return (uint32_t)-1;
 
-    memcpy(&val, vdev->config + addr, sizeof(val));
+    val = ldl_p(vdev->config + addr);
     return val;
 }
 
@@ -576,7 +585,7 @@ void virtio_config_writeb(VirtIODevice *vdev, uint32_t addr, uint32_t data)
     if (addr > (vdev->config_len - sizeof(val)))
         return;
 
-    memcpy(vdev->config + addr, &val, sizeof(val));
+    stb_p(vdev->config + addr, val);
 
     if (vdev->set_config)
         vdev->set_config(vdev, vdev->config);
@@ -589,7 +598,7 @@ void virtio_config_writew(VirtIODevice *vdev, uint32_t addr, uint32_t data)
     if (addr > (vdev->config_len - sizeof(val)))
         return;
 
-    memcpy(vdev->config + addr, &val, sizeof(val));
+    stw_p(vdev->config + addr, val);
 
     if (vdev->set_config)
         vdev->set_config(vdev, vdev->config);
@@ -602,7 +611,7 @@ void virtio_config_writel(VirtIODevice *vdev, uint32_t addr, uint32_t data)
     if (addr > (vdev->config_len - sizeof(val)))
         return;
 
-    memcpy(vdev->config + addr, &val, sizeof(val));
+    stl_p(vdev->config + addr, val);
 
     if (vdev->set_config)
         vdev->set_config(vdev, vdev->config);
@@ -622,6 +631,13 @@ target_phys_addr_t virtio_queue_get_addr(VirtIODevice *vdev, int n)
 int virtio_queue_get_num(VirtIODevice *vdev, int n)
 {
     return vdev->vq[n].vring.num;
+}
+
+int virtio_queue_get_id(VirtQueue *vq)
+{
+    VirtIODevice *vdev = vq->vdev;
+    assert(vq >= &vdev->vq[0] && vq < &vdev->vq[VIRTIO_PCI_QUEUE_MAX]);
+    return vq - &vdev->vq[0];
 }
 
 void virtio_queue_notify_vq(VirtQueue *vq)
@@ -693,6 +709,8 @@ static bool vring_notify(VirtIODevice *vdev, VirtQueue *vq)
 {
     uint16_t old, new;
     bool v;
+    /* We need to expose used array entries before checking used event. */
+    smp_mb();
     /* Always notify when queue is empty (when feature acknowledge) */
     if (((vdev->guest_features & (1 << VIRTIO_F_NOTIFY_ON_EMPTY)) &&
          !vq->inuse && vring_avail_idx(vq) == vq->last_avail_idx)) {
@@ -845,8 +863,7 @@ int virtio_load(VirtIODevice *vdev, QEMUFile *f)
 void virtio_cleanup(VirtIODevice *vdev)
 {
     qemu_del_vm_change_state_handler(vdev->vmstate);
-    if (vdev->config)
-        g_free(vdev->config);
+    g_free(vdev->config);
     g_free(vdev->vq);
     g_free(vdev);
 }

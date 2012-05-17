@@ -65,9 +65,6 @@
 
 #define PCI_FREQUENCY 33000000L
 
-/* debug RTL8139 card C+ mode only */
-//#define DEBUG_RTL8139CP 1
-
 #define SET_MASKED(input, mask, curr) \
     ( ( (input) & ~(mask) ) | ( (curr) & (mask) ) )
 
@@ -335,8 +332,10 @@ enum CSCRBits {
 };
 
 enum Cfg9346Bits {
-    Cfg9346_Lock = 0x00,
-    Cfg9346_Unlock = 0xC0,
+    Cfg9346_Normal = 0x00,
+    Cfg9346_Autoload = 0x40,
+    Cfg9346_Programming = 0x80,
+    Cfg9346_ConfigWrite = 0xC0,
 };
 
 typedef enum {
@@ -711,30 +710,6 @@ static void rtl8139_update_irq(RTL8139State *s)
     qemu_set_irq(s->dev.irq[0], (isr != 0));
 }
 
-#define POLYNOMIAL 0x04c11db6
-
-/* From FreeBSD */
-/* XXX: optimize */
-static int compute_mcast_idx(const uint8_t *ep)
-{
-    uint32_t crc;
-    int carry, i, j;
-    uint8_t b;
-
-    crc = 0xffffffff;
-    for (i = 0; i < 6; i++) {
-        b = *ep++;
-        for (j = 0; j < 8; j++) {
-            carry = ((crc & 0x80000000L) ? 1 : 0) ^ (b & 0x01);
-            crc <<= 1;
-            b >>= 1;
-            if (carry)
-                crc = ((crc ^ POLYNOMIAL) | carry);
-        }
-    }
-    return (crc >> 26);
-}
-
 static int rtl8139_RxWrap(RTL8139State *s)
 {
     /* wrapping enabled; assume 1.5k more buffer space if size < 65536 */
@@ -816,6 +791,9 @@ static int rtl8139_can_receive(VLANClientState *nc)
       return 1;
     if (!rtl8139_receiver_enabled(s))
       return 1;
+    /* network/host communication happens only in normal mode */
+    if ((s->Cfg9346 & Chip9346_op_mask) != Cfg9346_Normal)
+	return 0;
 
     if (rtl8139_cp_receiver_enabled(s)) {
         /* ??? Flow control not implemented in c+ mode.
@@ -855,6 +833,12 @@ static ssize_t rtl8139_do_receive(VLANClientState *nc, const uint8_t *buf, size_
     if (!rtl8139_receiver_enabled(s))
     {
         DPRINTF("receiver disabled ================\n");
+        return -1;
+    }
+
+    /* check whether we are in normal mode */
+    if ((s->Cfg9346 & Chip9346_op_mask) != Cfg9346_Normal) {
+        DPRINTF("not in normal op mode\n");
         return -1;
     }
 
@@ -991,13 +975,13 @@ static ssize_t rtl8139_do_receive(VLANClientState *nc, const uint8_t *buf, size_
 
         uint32_t val, rxdw0,rxdw1,rxbufLO,rxbufHI;
 
-        pci_dma_read(&s->dev, cplus_rx_ring_desc, (uint8_t *)&val, 4);
+        pci_dma_read(&s->dev, cplus_rx_ring_desc, &val, 4);
         rxdw0 = le32_to_cpu(val);
-        pci_dma_read(&s->dev, cplus_rx_ring_desc+4, (uint8_t *)&val, 4);
+        pci_dma_read(&s->dev, cplus_rx_ring_desc+4, &val, 4);
         rxdw1 = le32_to_cpu(val);
-        pci_dma_read(&s->dev, cplus_rx_ring_desc+8, (uint8_t *)&val, 4);
+        pci_dma_read(&s->dev, cplus_rx_ring_desc+8, &val, 4);
         rxbufLO = le32_to_cpu(val);
-        pci_dma_read(&s->dev, cplus_rx_ring_desc+12, (uint8_t *)&val, 4);
+        pci_dma_read(&s->dev, cplus_rx_ring_desc+12, &val, 4);
         rxbufHI = le32_to_cpu(val);
 
         DPRINTF("+++ C+ mode RX descriptor %d %08x %08x %08x %08x\n",
@@ -1478,7 +1462,7 @@ static uint32_t rtl8139_IntrMitigate_read(RTL8139State *s)
 
 static int rtl8139_config_writable(RTL8139State *s)
 {
-    if (s->Cfg9346 & Cfg9346_Unlock)
+    if ((s->Cfg9346 & Chip9346_op_mask) == Cfg9346_ConfigWrite)
     {
         return 1;
     }
@@ -2061,13 +2045,12 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
             s->cplus_txbuffer_len);
     }
 
-    while (s->cplus_txbuffer && s->cplus_txbuffer_offset + txsize >= s->cplus_txbuffer_len)
+    if (s->cplus_txbuffer_offset + txsize >= s->cplus_txbuffer_len)
     {
-        s->cplus_txbuffer_len += CP_TX_BUFFER_SIZE;
-        s->cplus_txbuffer = g_realloc(s->cplus_txbuffer, s->cplus_txbuffer_len);
-
-        DPRINTF("+++ C+ mode transmission buffer space changed to %d\n",
-            s->cplus_txbuffer_len);
+        /* The spec didn't tell the maximum size, stick to CP_TX_BUFFER_SIZE */
+        txsize = s->cplus_txbuffer_len - s->cplus_txbuffer_offset;
+        DPRINTF("+++ C+ mode transmission buffer overrun, truncated descriptor"
+                "length to %d\n", txsize);
     }
 
     if (!s->cplus_txbuffer)
@@ -2499,11 +2482,32 @@ static void rtl8139_TxStatus_write(RTL8139State *s, uint32_t txRegOffset, uint32
     rtl8139_transmit(s);
 }
 
-static uint32_t rtl8139_TxStatus_read(RTL8139State *s, uint32_t txRegOffset)
+static uint32_t rtl8139_TxStatus_TxAddr_read(RTL8139State *s, uint32_t regs[],
+                                             uint32_t base, uint8_t addr,
+                                             int size)
 {
-    uint32_t ret = s->TxStatus[txRegOffset/4];
+    uint32_t reg = (addr - base) / 4;
+    uint32_t offset = addr & 0x3;
+    uint32_t ret = 0;
 
-    DPRINTF("TxStatus read offset=0x%x val=0x%08x\n", txRegOffset, ret);
+    if (addr & (size - 1)) {
+        DPRINTF("not implemented read for TxStatus/TxAddr "
+                "addr=0x%x size=0x%x\n", addr, size);
+        return ret;
+    }
+
+    switch (size) {
+    case 1: /* fall through */
+    case 2: /* fall through */
+    case 4:
+        ret = (regs[reg] >> offset * 8) & (((uint64_t)1 << (size * 8)) - 1);
+        DPRINTF("TxStatus/TxAddr[%d] read addr=0x%x size=0x%x val=0x%08x\n",
+                reg, addr, size, ret);
+        break;
+    default:
+        DPRINTF("unsupported size 0x%x of TxStatus/TxAddr reading\n", size);
+        break;
+    }
 
     return ret;
 }
@@ -2662,7 +2666,7 @@ static void rtl8139_IntrStatus_write(RTL8139State *s, uint32_t val)
      * Computing if we miss an interrupt here is not that correct but
      * considered that we should have had already an interrupt
      * and probably emulated is slower is better to assume this resetting was
-     * done before testing on previous rtl8139_update_irq lead to IRQ loosing
+     * done before testing on previous rtl8139_update_irq lead to IRQ losing
      */
     rtl8139_set_next_tctr_time(s, qemu_get_clock_ns(vm_clock));
     rtl8139_update_irq(s);
@@ -2974,6 +2978,10 @@ static uint32_t rtl8139_io_readb(void *opaque, uint8_t addr)
         case MAR0 ... MAR0+7:
             ret = s->mult[addr - MAR0];
             break;
+        case TxStatus0 ... TxStatus0+4*4-1:
+            ret = rtl8139_TxStatus_TxAddr_read(s, s->TxStatus, TxStatus0,
+                                               addr, 1);
+            break;
         case ChipCmd:
             ret = rtl8139_ChipCmd_read(s);
             break;
@@ -3037,6 +3045,9 @@ static uint32_t rtl8139_io_readw(void *opaque, uint8_t addr)
 
     switch (addr)
     {
+        case TxAddr0 ... TxAddr0+4*4-1:
+            ret = rtl8139_TxStatus_TxAddr_read(s, s->TxAddr, TxAddr0, addr, 2);
+            break;
         case IntrMask:
             ret = rtl8139_IntrMask_read(s);
             break;
@@ -3127,7 +3138,8 @@ static uint32_t rtl8139_io_readl(void *opaque, uint8_t addr)
             break;
 
         case TxStatus0 ... TxStatus0+4*4-1:
-            ret = rtl8139_TxStatus_read(s, addr-TxStatus0);
+            ret = rtl8139_TxStatus_TxAddr_read(s, s->TxStatus, TxStatus0,
+                                               addr, 4);
             break;
 
         case TxAddr0 ... TxAddr0+4*4-1:
@@ -3478,7 +3490,7 @@ static int pci_rtl8139_init(PCIDevice *dev)
     s->eeprom.contents[9] = s->conf.macaddr.a[4] | s->conf.macaddr.a[5] << 8;
 
     s->nic = qemu_new_nic(&net_rtl8139_info, &s->conf,
-                          dev->qdev.info->name, dev->qdev.id, s);
+                          object_get_typename(OBJECT(dev)), dev->qdev.id, s);
     qemu_format_nic_info_str(&s->nic->nc, s->conf.macaddr.a);
 
     s->cplus_txbuffer = NULL;
@@ -3494,27 +3506,38 @@ static int pci_rtl8139_init(PCIDevice *dev)
     return 0;
 }
 
-static PCIDeviceInfo rtl8139_info = {
-    .qdev.name  = "rtl8139",
-    .qdev.size  = sizeof(RTL8139State),
-    .qdev.reset = rtl8139_reset,
-    .qdev.vmsd  = &vmstate_rtl8139,
-    .init       = pci_rtl8139_init,
-    .exit       = pci_rtl8139_uninit,
-    .romfile    = "pxe-rtl8139.rom",
-    .vendor_id  = PCI_VENDOR_ID_REALTEK,
-    .device_id  = PCI_DEVICE_ID_REALTEK_8139,
-    .revision   = RTL8139_PCI_REVID, /* >=0x20 is for 8139C+ */
-    .class_id   = PCI_CLASS_NETWORK_ETHERNET,
-    .qdev.props = (Property[]) {
-        DEFINE_NIC_PROPERTIES(RTL8139State, conf),
-        DEFINE_PROP_END_OF_LIST(),
-    }
+static Property rtl8139_properties[] = {
+    DEFINE_NIC_PROPERTIES(RTL8139State, conf),
+    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void rtl8139_register_devices(void)
+static void rtl8139_class_init(ObjectClass *klass, void *data)
 {
-    pci_qdev_register(&rtl8139_info);
+    DeviceClass *dc = DEVICE_CLASS(klass);
+    PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
+
+    k->init = pci_rtl8139_init;
+    k->exit = pci_rtl8139_uninit;
+    k->romfile = "pxe-rtl8139.rom";
+    k->vendor_id = PCI_VENDOR_ID_REALTEK;
+    k->device_id = PCI_DEVICE_ID_REALTEK_8139;
+    k->revision = RTL8139_PCI_REVID; /* >=0x20 is for 8139C+ */
+    k->class_id = PCI_CLASS_NETWORK_ETHERNET;
+    dc->reset = rtl8139_reset;
+    dc->vmsd = &vmstate_rtl8139;
+    dc->props = rtl8139_properties;
 }
 
-device_init(rtl8139_register_devices)
+static TypeInfo rtl8139_info = {
+    .name          = "rtl8139",
+    .parent        = TYPE_PCI_DEVICE,
+    .instance_size = sizeof(RTL8139State),
+    .class_init    = rtl8139_class_init,
+};
+
+static void rtl8139_register_types(void)
+{
+    type_register_static(&rtl8139_info);
+}
+
+type_init(rtl8139_register_types)

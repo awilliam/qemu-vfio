@@ -9,7 +9,6 @@
  */
 #include "qemu-common.h"
 #include "qemu-aio.h"
-#include "block_int.h"
 #include "block/raw-posix-aio.h"
 
 #include <sys/eventfd.h>
@@ -166,8 +165,6 @@ BlockDriverAIOCB *laio_submit(BlockDriverState *bs, void *aio_ctx, int fd,
     off_t offset = sector_num * 512;
 
     laiocb = qemu_aio_get(&laio_pool, bs, cb, opaque);
-    if (!laiocb)
-        return NULL;
     laiocb->nbytes = nb_sectors * 512;
     laiocb->ctx = s;
     laiocb->ret = -EINPROGRESS;
@@ -217,7 +214,7 @@ void *laio_init(void)
         goto out_close_efd;
 
     qemu_aio_set_fd_handler(s->efd, qemu_laio_completion_cb, NULL,
-        qemu_laio_flush_cb, NULL, s);
+        qemu_laio_flush_cb, s);
 
     return s;
 

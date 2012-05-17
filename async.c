@@ -35,10 +35,10 @@ static struct QEMUBH *first_bh;
 struct QEMUBH {
     QEMUBHFunc *cb;
     void *opaque;
-    int scheduled;
-    int idle;
-    int deleted;
     QEMUBH *next;
+    bool scheduled;
+    bool idle;
+    bool deleted;
 };
 
 QEMUBH *qemu_bh_new(QEMUBHFunc *cb, void *opaque)
@@ -120,7 +120,7 @@ void qemu_bh_delete(QEMUBH *bh)
     bh->deleted = 1;
 }
 
-void qemu_bh_update_timeout(int *timeout)
+void qemu_bh_update_timeout(uint32_t *timeout)
 {
     QEMUBH *bh;
 

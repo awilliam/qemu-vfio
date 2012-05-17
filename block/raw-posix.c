@@ -29,7 +29,7 @@
 #include "module.h"
 #include "block/raw-posix-aio.h"
 
-#ifdef CONFIG_COCOA
+#if defined(__APPLE__) && (__MACH__)
 #include <paths.h>
 #include <sys/param.h>
 #include <IOKit/IOKitLib.h>
@@ -505,7 +505,7 @@ again:
         }
         if (size == 0)
 #endif
-#ifdef CONFIG_COCOA
+#if defined(__APPLE__) && defined(__MACH__)
         size = LONG_LONG_MAX;
 #else
         size = lseek(fd, 0LL, SEEK_END);
@@ -650,7 +650,7 @@ static BlockDriver bdrv_file = {
 /***********************************************/
 /* host device */
 
-#ifdef CONFIG_COCOA
+#if defined(__APPLE__) && defined(__MACH__)
 static kern_return_t FindEjectableCDMedia( io_iterator_t *mediaIterator );
 static kern_return_t GetBSDPath( io_iterator_t mediaIterator, char *bsdPath, CFIndex maxPathSize );
 
@@ -728,7 +728,7 @@ static int hdev_open(BlockDriverState *bs, const char *filename, int flags)
 {
     BDRVRawState *s = bs->opaque;
 
-#ifdef CONFIG_COCOA
+#if defined(__APPLE__) && defined(__MACH__)
     if (strstart(filename, "/dev/cdrom", NULL)) {
         kern_return_t kernResult;
         io_iterator_t mediaIterator;
@@ -994,7 +994,7 @@ static int floppy_media_changed(BlockDriverState *bs)
     return ret;
 }
 
-static void floppy_eject(BlockDriverState *bs, int eject_flag)
+static void floppy_eject(BlockDriverState *bs, bool eject_flag)
 {
     BDRVRawState *s = bs->opaque;
     int fd;
@@ -1084,7 +1084,7 @@ static int cdrom_is_inserted(BlockDriverState *bs)
     return 0;
 }
 
-static void cdrom_eject(BlockDriverState *bs, int eject_flag)
+static void cdrom_eject(BlockDriverState *bs, bool eject_flag)
 {
     BDRVRawState *s = bs->opaque;
 
@@ -1153,7 +1153,7 @@ static int cdrom_open(BlockDriverState *bs, const char *filename, int flags)
     if (ret)
         return ret;
 
-    /* make sure the door isnt locked at this time */
+    /* make sure the door isn't locked at this time */
     ioctl(s->fd, CDIOCALLOW);
     return 0;
 }
@@ -1184,7 +1184,7 @@ static int cdrom_reopen(BlockDriverState *bs)
     }
     s->fd = fd;
 
-    /* make sure the door isnt locked at this time */
+    /* make sure the door isn't locked at this time */
     ioctl(s->fd, CDIOCALLOW);
     return 0;
 }
@@ -1194,7 +1194,7 @@ static int cdrom_is_inserted(BlockDriverState *bs)
     return raw_getlength(bs) > 0;
 }
 
-static void cdrom_eject(BlockDriverState *bs, int eject_flag)
+static void cdrom_eject(BlockDriverState *bs, bool eject_flag)
 {
     BDRVRawState *s = bs->opaque;
 

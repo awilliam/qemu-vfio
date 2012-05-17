@@ -28,21 +28,12 @@
 
 #include "config.h"
 
+/* Define to jump the ELF file used to communicate with GDB.  */
+#undef DEBUG_JIT
+
 #if !defined(CONFIG_DEBUG_TCG) && !defined(NDEBUG)
 /* define it to suppress various consistency checks (faster) */
 #define NDEBUG
-#endif
-
-#include <stdarg.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-#include <inttypes.h>
-#ifdef _WIN32
-#include <malloc.h>
-#endif
-#ifdef _AIX
-#include <alloca.h>
 #endif
 
 #include "qemu-common.h"
@@ -57,6 +48,18 @@
 #include "cpu.h"
 
 #include "tcg-op.h"
+
+#if TCG_TARGET_REG_BITS == 64
+# define ELF_CLASS  ELFCLASS64
+#else
+# define ELF_CLASS  ELFCLASS32
+#endif
+#ifdef HOST_WORDS_BIGENDIAN
+# define ELF_DATA   ELFDATA2MSB
+#else
+# define ELF_DATA   ELFDATA2LSB
+#endif
+
 #include "elf.h"
 
 #if defined(CONFIG_USE_GUEST_BASE) && !defined(TCG_TARGET_HAS_GUEST_BASE)
@@ -68,6 +71,10 @@ static void tcg_target_init(TCGContext *s);
 static void tcg_target_qemu_prologue(TCGContext *s);
 static void patch_reloc(uint8_t *code_ptr, int type, 
                         tcg_target_long value, tcg_target_long addend);
+
+static void tcg_register_jit_int(void *buf, size_t size,
+                                 void *debug_frame, size_t debug_frame_size)
+    __attribute__((unused));
 
 /* Forward declarations for functions declared and used in tcg-target.c. */
 static int target_parse_constraint(TCGArgConstraint *ct, const char **pct_str);
@@ -140,11 +147,11 @@ static void tcg_out_reloc(TCGContext *s, uint8_t *code_ptr, int type,
     }
 }
 
-static void tcg_out_label(TCGContext *s, int label_index, 
-                          tcg_target_long value)
+static void tcg_out_label(TCGContext *s, int label_index, void *ptr)
 {
     TCGLabel *l;
     TCGRelocation *r;
+    tcg_target_long value = (tcg_target_long)ptr;
 
     l = &s->labels[label_index];
     if (l->has_value)
@@ -185,11 +192,9 @@ void *tcg_malloc_internal(TCGContext *s, int size)
         /* big malloc: insert a new pool (XXX: could optimize) */
         p = g_malloc(sizeof(TCGPool) + size);
         p->size = size;
-        if (s->pool_current)
-            s->pool_current->next = p;
-        else
-            s->pool_first = p;
-        p->next = s->pool_current;
+        p->next = s->pool_first_large;
+        s->pool_first_large = p;
+        return p->data;
     } else {
         p = s->pool_current;
         if (!p) {
@@ -220,6 +225,12 @@ void *tcg_malloc_internal(TCGContext *s, int size)
 
 void tcg_pool_reset(TCGContext *s)
 {
+    TCGPool *p, *t;
+    for (p = s->pool_first_large; p; p = t) {
+        t = p->next;
+        g_free(p);
+    }
+    s->pool_first_large = NULL;
     s->pool_cur = s->pool_end = NULL;
     s->pool_current = NULL;
 }
@@ -265,8 +276,8 @@ void tcg_prologue_init(TCGContext *s)
     s->code_buf = code_gen_prologue;
     s->code_ptr = s->code_buf;
     tcg_target_qemu_prologue(s);
-    flush_icache_range((unsigned long)s->code_buf, 
-                       (unsigned long)s->code_ptr);
+    flush_icache_range((tcg_target_ulong)s->code_buf,
+                       (tcg_target_ulong)s->code_ptr);
 }
 
 void tcg_set_frame(TCGContext *s, int reg,
@@ -602,9 +613,6 @@ void tcg_register_helper(void *func, const char *name)
 void tcg_gen_callN(TCGContext *s, TCGv_ptr func, unsigned int flags,
                    int sizemask, TCGArg ret, int nargs, TCGArg *args)
 {
-#if defined(TCG_TARGET_I386) && TCG_TARGET_REG_BITS < 64
-    int call_type;
-#endif
     int i;
     int real_args;
     int nb_rets;
@@ -629,9 +637,6 @@ void tcg_gen_callN(TCGContext *s, TCGv_ptr func, unsigned int flags,
 
     *gen_opc_ptr++ = INDEX_op_call;
     nparam = gen_opparam_ptr++;
-#if defined(TCG_TARGET_I386) && TCG_TARGET_REG_BITS < 64
-    call_type = (flags & TCG_CALL_TYPE_MASK);
-#endif
     if (ret != TCG_CALL_DUMMY_ARG) {
 #if TCG_TARGET_REG_BITS < 64
         if (sizemask & 1) {
@@ -657,14 +662,6 @@ void tcg_gen_callN(TCGContext *s, TCGv_ptr func, unsigned int flags,
 #if TCG_TARGET_REG_BITS < 64
         int is_64bit = sizemask & (1 << (i+1)*2);
         if (is_64bit) {
-#ifdef TCG_TARGET_I386
-            /* REGPARM case: if the third parameter is 64 bit, it is
-               allocated on the stack */
-            if (i == 2 && call_type == TCG_CALL_TYPE_REGPARM) {
-                call_type = TCG_CALL_TYPE_REGPARM_2;
-                flags = (flags & ~TCG_CALL_TYPE_MASK) | call_type;
-            }
-#endif
 #ifdef TCG_TARGET_CALL_ALIGN_ARGS
             /* some targets want aligned 64 bit args */
             if (real_args & 1) {
@@ -1555,7 +1552,7 @@ static void temp_save(TCGContext *s, int temp, TCGRegSet allocated_regs)
     }
 }
 
-/* save globals to their cannonical location and assume they can be
+/* save globals to their canonical location and assume they can be
    modified be the following code. 'allocated_regs' is used in case a
    temporary registers needs to be allocated to store a constant. */
 static void save_globals(TCGContext *s, TCGRegSet allocated_regs)
@@ -2135,7 +2132,7 @@ static inline int tcg_gen_code_common(TCGContext *s, uint8_t *gen_code_buf,
             break;
         case INDEX_op_set_label:
             tcg_reg_alloc_bb_end(s, s->reserved_regs);
-            tcg_out_label(s, args[0], (long)s->code_ptr);
+            tcg_out_label(s, args[0], s->code_ptr);
             break;
         case INDEX_op_call:
             dead_args = s->op_dead_args[op_index];
@@ -2188,8 +2185,9 @@ int tcg_gen_code(TCGContext *s, uint8_t *gen_code_buf)
     tcg_gen_code_common(s, gen_code_buf, -1);
 
     /* flush instruction cache */
-    flush_icache_range((unsigned long)gen_code_buf, 
-                       (unsigned long)s->code_ptr);
+    flush_icache_range((tcg_target_ulong)gen_code_buf,
+                       (tcg_target_ulong)s->code_ptr);
+
     return s->code_ptr -  gen_code_buf;
 }
 
@@ -2252,3 +2250,267 @@ void tcg_dump_info(FILE *f, fprintf_function cpu_fprintf)
     cpu_fprintf(f, "[TCG profiler not compiled]\n");
 }
 #endif
+
+#ifdef ELF_HOST_MACHINE
+/* In order to use this feature, the backend needs to do three things:
+
+   (1) Define ELF_HOST_MACHINE to indicate both what value to
+       put into the ELF image and to indicate support for the feature.
+
+   (2) Define tcg_register_jit.  This should create a buffer containing
+       the contents of a .debug_frame section that describes the post-
+       prologue unwind info for the tcg machine.
+
+   (3) Call tcg_register_jit_int, with the constructed .debug_frame.
+*/
+
+/* Begin GDB interface.  THE FOLLOWING MUST MATCH GDB DOCS.  */
+typedef enum {
+    JIT_NOACTION = 0,
+    JIT_REGISTER_FN,
+    JIT_UNREGISTER_FN
+} jit_actions_t;
+
+struct jit_code_entry {
+    struct jit_code_entry *next_entry;
+    struct jit_code_entry *prev_entry;
+    const void *symfile_addr;
+    uint64_t symfile_size;
+};
+
+struct jit_descriptor {
+    uint32_t version;
+    uint32_t action_flag;
+    struct jit_code_entry *relevant_entry;
+    struct jit_code_entry *first_entry;
+};
+
+void __jit_debug_register_code(void) __attribute__((noinline));
+void __jit_debug_register_code(void)
+{
+    asm("");
+}
+
+/* Must statically initialize the version, because GDB may check
+   the version before we can set it.  */
+struct jit_descriptor __jit_debug_descriptor = { 1, 0, 0, 0 };
+
+/* End GDB interface.  */
+
+static int find_string(const char *strtab, const char *str)
+{
+    const char *p = strtab + 1;
+
+    while (1) {
+        if (strcmp(p, str) == 0) {
+            return p - strtab;
+        }
+        p += strlen(p) + 1;
+    }
+}
+
+static void tcg_register_jit_int(void *buf_ptr, size_t buf_size,
+                                 void *debug_frame, size_t debug_frame_size)
+{
+    struct __attribute__((packed)) DebugInfo {
+        uint32_t  len;
+        uint16_t  version;
+        uint32_t  abbrev;
+        uint8_t   ptr_size;
+        uint8_t   cu_die;
+        uint16_t  cu_lang;
+        uintptr_t cu_low_pc;
+        uintptr_t cu_high_pc;
+        uint8_t   fn_die;
+        char      fn_name[16];
+        uintptr_t fn_low_pc;
+        uintptr_t fn_high_pc;
+        uint8_t   cu_eoc;
+    };
+
+    struct ElfImage {
+        ElfW(Ehdr) ehdr;
+        ElfW(Phdr) phdr;
+        ElfW(Shdr) shdr[7];
+        ElfW(Sym)  sym[2];
+        struct DebugInfo di;
+        uint8_t    da[24];
+        char       str[80];
+    };
+
+    struct ElfImage *img;
+
+    static const struct ElfImage img_template = {
+        .ehdr = {
+            .e_ident[EI_MAG0] = ELFMAG0,
+            .e_ident[EI_MAG1] = ELFMAG1,
+            .e_ident[EI_MAG2] = ELFMAG2,
+            .e_ident[EI_MAG3] = ELFMAG3,
+            .e_ident[EI_CLASS] = ELF_CLASS,
+            .e_ident[EI_DATA] = ELF_DATA,
+            .e_ident[EI_VERSION] = EV_CURRENT,
+            .e_type = ET_EXEC,
+            .e_machine = ELF_HOST_MACHINE,
+            .e_version = EV_CURRENT,
+            .e_phoff = offsetof(struct ElfImage, phdr),
+            .e_shoff = offsetof(struct ElfImage, shdr),
+            .e_ehsize = sizeof(ElfW(Shdr)),
+            .e_phentsize = sizeof(ElfW(Phdr)),
+            .e_phnum = 1,
+            .e_shentsize = sizeof(ElfW(Shdr)),
+            .e_shnum = ARRAY_SIZE(img->shdr),
+            .e_shstrndx = ARRAY_SIZE(img->shdr) - 1,
+#ifdef ELF_HOST_FLAGS
+            .e_flags = ELF_HOST_FLAGS,
+#endif
+#ifdef ELF_OSABI
+            .e_ident[EI_OSABI] = ELF_OSABI,
+#endif
+        },
+        .phdr = {
+            .p_type = PT_LOAD,
+            .p_flags = PF_X,
+        },
+        .shdr = {
+            [0] = { .sh_type = SHT_NULL },
+            /* Trick: The contents of code_gen_buffer are not present in
+               this fake ELF file; that got allocated elsewhere.  Therefore
+               we mark .text as SHT_NOBITS (similar to .bss) so that readers
+               will not look for contents.  We can record any address.  */
+            [1] = { /* .text */
+                .sh_type = SHT_NOBITS,
+                .sh_flags = SHF_EXECINSTR | SHF_ALLOC,
+            },
+            [2] = { /* .debug_info */
+                .sh_type = SHT_PROGBITS,
+                .sh_offset = offsetof(struct ElfImage, di),
+                .sh_size = sizeof(struct DebugInfo),
+            },
+            [3] = { /* .debug_abbrev */
+                .sh_type = SHT_PROGBITS,
+                .sh_offset = offsetof(struct ElfImage, da),
+                .sh_size = sizeof(img->da),
+            },
+            [4] = { /* .debug_frame */
+                .sh_type = SHT_PROGBITS,
+                .sh_offset = sizeof(struct ElfImage),
+            },
+            [5] = { /* .symtab */
+                .sh_type = SHT_SYMTAB,
+                .sh_offset = offsetof(struct ElfImage, sym),
+                .sh_size = sizeof(img->sym),
+                .sh_info = 1,
+                .sh_link = ARRAY_SIZE(img->shdr) - 1,
+                .sh_entsize = sizeof(ElfW(Sym)),
+            },
+            [6] = { /* .strtab */
+                .sh_type = SHT_STRTAB,
+                .sh_offset = offsetof(struct ElfImage, str),
+                .sh_size = sizeof(img->str),
+            }
+        },
+        .sym = {
+            [1] = { /* code_gen_buffer */
+                .st_info = ELF_ST_INFO(STB_GLOBAL, STT_FUNC),
+                .st_shndx = 1,
+            }
+        },
+        .di = {
+            .len = sizeof(struct DebugInfo) - 4,
+            .version = 2,
+            .ptr_size = sizeof(void *),
+            .cu_die = 1,
+            .cu_lang = 0x8001,  /* DW_LANG_Mips_Assembler */
+            .fn_die = 2,
+            .fn_name = "code_gen_buffer"
+        },
+        .da = {
+            1,          /* abbrev number (the cu) */
+            0x11, 1,    /* DW_TAG_compile_unit, has children */
+            0x13, 0x5,  /* DW_AT_language, DW_FORM_data2 */
+            0x11, 0x1,  /* DW_AT_low_pc, DW_FORM_addr */
+            0x12, 0x1,  /* DW_AT_high_pc, DW_FORM_addr */
+            0, 0,       /* end of abbrev */
+            2,          /* abbrev number (the fn) */
+            0x2e, 0,    /* DW_TAG_subprogram, no children */
+            0x3, 0x8,   /* DW_AT_name, DW_FORM_string */
+            0x11, 0x1,  /* DW_AT_low_pc, DW_FORM_addr */
+            0x12, 0x1,  /* DW_AT_high_pc, DW_FORM_addr */
+            0, 0,       /* end of abbrev */
+            0           /* no more abbrev */
+        },
+        .str = "\0" ".text\0" ".debug_info\0" ".debug_abbrev\0"
+               ".debug_frame\0" ".symtab\0" ".strtab\0" "code_gen_buffer",
+    };
+
+    /* We only need a single jit entry; statically allocate it.  */
+    static struct jit_code_entry one_entry;
+
+    uintptr_t buf = (uintptr_t)buf_ptr;
+    size_t img_size = sizeof(struct ElfImage) + debug_frame_size;
+
+    img = g_malloc(img_size);
+    *img = img_template;
+    memcpy(img + 1, debug_frame, debug_frame_size);
+
+    img->phdr.p_vaddr = buf;
+    img->phdr.p_paddr = buf;
+    img->phdr.p_memsz = buf_size;
+
+    img->shdr[1].sh_name = find_string(img->str, ".text");
+    img->shdr[1].sh_addr = buf;
+    img->shdr[1].sh_size = buf_size;
+
+    img->shdr[2].sh_name = find_string(img->str, ".debug_info");
+    img->shdr[3].sh_name = find_string(img->str, ".debug_abbrev");
+
+    img->shdr[4].sh_name = find_string(img->str, ".debug_frame");
+    img->shdr[4].sh_size = debug_frame_size;
+
+    img->shdr[5].sh_name = find_string(img->str, ".symtab");
+    img->shdr[6].sh_name = find_string(img->str, ".strtab");
+
+    img->sym[1].st_name = find_string(img->str, "code_gen_buffer");
+    img->sym[1].st_value = buf;
+    img->sym[1].st_size = buf_size;
+
+    img->di.cu_low_pc = buf;
+    img->di.cu_high_pc = buf_size;
+    img->di.fn_low_pc = buf;
+    img->di.fn_high_pc = buf_size;
+
+#ifdef DEBUG_JIT
+    /* Enable this block to be able to debug the ELF image file creation.
+       One can use readelf, objdump, or other inspection utilities.  */
+    {
+        FILE *f = fopen("/tmp/qemu.jit", "w+b");
+        if (f) {
+            if (fwrite(img, img_size, 1, f) != img_size) {
+                /* Avoid stupid unused return value warning for fwrite.  */
+            }
+            fclose(f);
+        }
+    }
+#endif
+
+    one_entry.symfile_addr = img;
+    one_entry.symfile_size = img_size;
+
+    __jit_debug_descriptor.action_flag = JIT_REGISTER_FN;
+    __jit_debug_descriptor.relevant_entry = &one_entry;
+    __jit_debug_descriptor.first_entry = &one_entry;
+    __jit_debug_register_code();
+}
+#else
+/* No support for the feature.  Provide the entry point expected by exec.c,
+   and implement the internal function we declared earlier.  */
+
+static void tcg_register_jit_int(void *buf, size_t size,
+                                 void *debug_frame, size_t debug_frame_size)
+{
+}
+
+void tcg_register_jit(void *buf, size_t buf_size)
+{
+}
+#endif /* ELF_HOST_MACHINE */

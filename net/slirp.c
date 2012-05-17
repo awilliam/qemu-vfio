@@ -351,7 +351,7 @@ void net_slirp_hostfwd_remove(Monitor *mon, const QDict *qdict)
                                host_addr, host_port);
 
     monitor_printf(mon, "host forwarding rule for %s %s\n", src_str,
-                   err ? "removed" : "not found");
+                   err ? "not found" : "removed");
     return;
 
  fail_syntax:
@@ -507,10 +507,10 @@ static int slirp_smb(SlirpState* s, const char *exported_dir,
     fprintf(f,
             "[global]\n"
             "private dir=%s\n"
-            "smb ports=0\n"
             "socket address=127.0.0.1\n"
             "pid directory=%s\n"
             "lock directory=%s\n"
+            "state directory=%s\n"
             "log file=%s/log.smbd\n"
             "smb passwd file=%s/smbpasswd\n"
             "security = share\n"
@@ -518,6 +518,7 @@ static int slirp_smb(SlirpState* s, const char *exported_dir,
             "path=%s\n"
             "read only=no\n"
             "guest ok=yes\n",
+            s->smb_dir,
             s->smb_dir,
             s->smb_dir,
             s->smb_dir,

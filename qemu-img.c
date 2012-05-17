@@ -66,8 +66,8 @@ static void help(void)
            "  'filename' is a disk image filename\n"
            "  'fmt' is the disk image format. It is guessed automatically in most cases\n"
            "  'cache' is the cache mode used to write the output disk image, the valid\n"
-           "    options are: 'none', 'writeback' (default), 'writethrough', 'directsync'\n"
-           "    and 'unsafe'\n"
+           "    options are: 'none', 'writeback' (default, except for convert), 'writethrough',\n"
+           "    'directsync' and 'unsafe' (default for convert)\n"
            "  'size' is the disk image size in bytes. Optional suffixes\n"
            "    'k' or 'K' (kilobyte, 1024), 'M' (megabyte, 1024k), 'G' (gigabyte, 1024M)\n"
            "    and T (terabyte, 1024G) are supported. 'b' is ignored.\n"
@@ -428,6 +428,13 @@ static int img_check(int argc, char **argv)
         }
     }
 
+    if (result.bfi.total_clusters != 0 && result.bfi.allocated_clusters != 0) {
+        printf("%" PRId64 "/%" PRId64 "= %0.2f%% allocated, %0.2f%% fragmented\n",
+        result.bfi.allocated_clusters, result.bfi.total_clusters,
+        result.bfi.allocated_clusters * 100.0 / result.bfi.total_clusters,
+        result.bfi.fragmented_clusters * 100.0 / result.bfi.allocated_clusters);
+    }
+
     bdrv_delete(bs);
 
     if (ret < 0 || result.check_errors) {
@@ -515,40 +522,6 @@ static int img_commit(int argc, char **argv)
 }
 
 /*
- * Checks whether the sector is not a zero sector.
- *
- * Attention! The len must be a multiple of 4 * sizeof(long) due to
- * restriction of optimizations in this function.
- */
-static int is_not_zero(const uint8_t *sector, int len)
-{
-    /*
-     * Use long as the biggest available internal data type that fits into the
-     * CPU register and unroll the loop to smooth out the effect of memory
-     * latency.
-     */
-
-    int i;
-    long d0, d1, d2, d3;
-    const long * const data = (const long *) sector;
-
-    len /= sizeof(long);
-
-    for(i = 0; i < len; i += 4) {
-        d0 = data[i + 0];
-        d1 = data[i + 1];
-        d2 = data[i + 2];
-        d3 = data[i + 3];
-
-        if (d0 || d1 || d2 || d3) {
-            return 1;
-        }
-    }
-
-    return 0;
-}
-
-/*
  * Returns true iff the first sector pointed to by 'buf' contains at least
  * a non-NUL byte.
  *
@@ -557,20 +530,22 @@ static int is_not_zero(const uint8_t *sector, int len)
  */
 static int is_allocated_sectors(const uint8_t *buf, int n, int *pnum)
 {
-    int v, i;
+    bool is_zero;
+    int i;
 
     if (n <= 0) {
         *pnum = 0;
         return 0;
     }
-    v = is_not_zero(buf, 512);
+    is_zero = buffer_is_zero(buf, 512);
     for(i = 1; i < n; i++) {
         buf += 512;
-        if (v != is_not_zero(buf, 512))
+        if (is_zero != buffer_is_zero(buf, 512)) {
             break;
+        }
     }
     *pnum = i;
-    return v;
+    return !is_zero;
 }
 
 /*
@@ -737,6 +712,9 @@ static int img_convert(int argc, char **argv)
 
     out_filename = argv[argc - 1];
 
+    /* Initialize before goto out */
+    qemu_progress_init(progress, 2.0);
+
     if (options && !strcmp(options, "?")) {
         ret = print_block_option_help(out_filename, out_fmt);
         goto out;
@@ -748,8 +726,7 @@ static int img_convert(int argc, char **argv)
         ret = -1;
         goto out;
     }
-        
-    qemu_progress_init(progress, 2.0);
+
     qemu_progress_print(0, 100);
 
     bs = g_malloc0(bs_n * sizeof(BlockDriverState *));
@@ -955,7 +932,7 @@ static int img_convert(int argc, char **argv)
             if (n < cluster_sectors) {
                 memset(buf + n * 512, 0, cluster_size - n * 512);
             }
-            if (is_not_zero(buf, cluster_size)) {
+            if (!buffer_is_zero(buf, cluster_size)) {
                 ret = bdrv_write_compressed(out_bs, sector_num, buf,
                                             cluster_sectors);
                 if (ret != 0) {
@@ -1157,14 +1134,19 @@ static int img_info(int argc, char **argv)
         if (bdi.cluster_size != 0) {
             printf("cluster_size: %d\n", bdi.cluster_size);
         }
+        if (bdi.is_dirty) {
+            printf("cleanly shut down: no\n");
+        }
     }
     bdrv_get_backing_filename(bs, backing_filename, sizeof(backing_filename));
     if (backing_filename[0] != '\0') {
-        path_combine(backing_filename2, sizeof(backing_filename2),
-                     filename, backing_filename);
-        printf("backing file: %s (actual path: %s)\n",
-               backing_filename,
-               backing_filename2);
+        bdrv_get_full_backing_filename(bs, backing_filename2,
+                                       sizeof(backing_filename2));
+        printf("backing file: %s", backing_filename);
+        if (strcmp(backing_filename, backing_filename2) != 0) {
+            printf(" (actual path: %s)", backing_filename2);
+        }
+        putchar('\n');
     }
     dump_snapshots(bs);
     bdrv_delete(bs);
@@ -1420,6 +1402,8 @@ static int img_rebase(int argc, char **argv)
      */
     if (!unsafe) {
         uint64_t num_sectors;
+        uint64_t old_backing_num_sectors;
+        uint64_t new_backing_num_sectors;
         uint64_t sector;
         int n;
         uint8_t * buf_old;
@@ -1430,6 +1414,8 @@ static int img_rebase(int argc, char **argv)
         buf_new = qemu_blockalign(bs, IO_BUF_SIZE);
 
         bdrv_get_geometry(bs, &num_sectors);
+        bdrv_get_geometry(bs_old_backing, &old_backing_num_sectors);
+        bdrv_get_geometry(bs_new_backing, &new_backing_num_sectors);
 
         local_progress = (float)100 /
             (num_sectors / MIN(num_sectors, IO_BUF_SIZE / 512));
@@ -1448,16 +1434,36 @@ static int img_rebase(int argc, char **argv)
                 continue;
             }
 
-            /* Read old and new backing file */
-            ret = bdrv_read(bs_old_backing, sector, buf_old, n);
-            if (ret < 0) {
-                error_report("error while reading from old backing file");
-                goto out;
+            /*
+             * Read old and new backing file and take into consideration that
+             * backing files may be smaller than the COW image.
+             */
+            if (sector >= old_backing_num_sectors) {
+                memset(buf_old, 0, n * BDRV_SECTOR_SIZE);
+            } else {
+                if (sector + n > old_backing_num_sectors) {
+                    n = old_backing_num_sectors - sector;
+                }
+
+                ret = bdrv_read(bs_old_backing, sector, buf_old, n);
+                if (ret < 0) {
+                    error_report("error while reading from old backing file");
+                    goto out;
+                }
             }
-            ret = bdrv_read(bs_new_backing, sector, buf_new, n);
-            if (ret < 0) {
-                error_report("error while reading from new backing file");
-                goto out;
+
+            if (sector >= new_backing_num_sectors) {
+                memset(buf_new, 0, n * BDRV_SECTOR_SIZE);
+            } else {
+                if (sector + n > new_backing_num_sectors) {
+                    n = new_backing_num_sectors - sector;
+                }
+
+                ret = bdrv_read(bs_new_backing, sector, buf_new, n);
+                if (ret < 0) {
+                    error_report("error while reading from new backing file");
+                    goto out;
+                }
             }
 
             /* If they differ, we need to write to the COW file */
@@ -1622,7 +1628,7 @@ static int img_resize(int argc, char **argv)
         printf("Image resized.\n");
         break;
     case -ENOTSUP:
-        error_report("This image format does not support resize");
+        error_report("This image does not support resize");
         break;
     case -EACCES:
         error_report("Image is read-only");
@@ -1662,6 +1668,8 @@ int main(int argc, char **argv)
         help();
     cmdname = argv[1];
     argc--; argv++;
+
+    qemu_init_main_loop();
 
     /* find the command */
     for(cmd = img_cmds; cmd->name != NULL; cmd++) {

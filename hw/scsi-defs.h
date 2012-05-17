@@ -78,6 +78,7 @@
 #define READ_TOC              0x43
 #define REPORT_DENSITY_SUPPORT 0x44
 #define GET_CONFIGURATION     0x46
+#define SANITIZE              0x48
 #define GET_EVENT_STATUS_NOTIFICATION 0x4a
 #define LOG_SELECT            0x4c
 #define LOG_SENSE             0x4d
@@ -91,6 +92,7 @@
 #define PERSISTENT_RESERVE_OUT 0x5f
 #define VARLENGTH_CDB         0x7f
 #define WRITE_FILEMARKS_16    0x80
+#define READ_REVERSE_16       0x81
 #define ALLOW_OVERWRITE       0x82
 #define EXTENDED_COPY         0x83
 #define ATA_PASSTHROUGH       0x85

@@ -7,6 +7,7 @@
  */
 #include "hw.h"
 #include "qemu-timer.h"
+#include "ptimer.h"
 #include "host-utils.h"
 
 struct ptimer_state
@@ -179,6 +180,19 @@ void ptimer_set_freq(ptimer_state *s, uint32_t freq)
    count = limit.  */
 void ptimer_set_limit(ptimer_state *s, uint64_t limit, int reload)
 {
+    /*
+     * Artificially limit timeout rate to something
+     * achievable under QEMU.  Otherwise, QEMU spends all
+     * its time generating timer interrupts, and there
+     * is no forward progress.
+     * About ten microseconds is the fastest that really works
+     * on the current generation of host machines.
+     */
+
+    if (limit * s->period < 10000 && s->period) {
+        limit = 10000 / s->period;
+    }
+
     s->limit = limit;
     if (reload)
         s->delta = limit;

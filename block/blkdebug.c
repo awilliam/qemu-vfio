@@ -292,10 +292,10 @@ static int blkdebug_open(BlockDriverState *bs, const char *filename, int flags)
         return -EINVAL;
     }
 
-    config = strdup(filename);
+    config = g_strdup(filename);
     config[c - filename] = '\0';
     ret = read_config(s, config);
-    free(config);
+    g_free(config);
     if (ret < 0) {
         return ret;
     }
@@ -397,12 +397,6 @@ static void blkdebug_close(BlockDriverState *bs)
     }
 }
 
-static BlockDriverAIOCB *blkdebug_aio_flush(BlockDriverState *bs,
-    BlockDriverCompletionFunc *cb, void *opaque)
-{
-    return bdrv_aio_flush(bs->file, cb, opaque);
-}
-
 static void process_rule(BlockDriverState *bs, struct BlkdebugRule *rule,
     BlkdebugVars *old_vars)
 {
@@ -452,7 +446,6 @@ static BlockDriver bdrv_blkdebug = {
 
     .bdrv_aio_readv     = blkdebug_aio_readv,
     .bdrv_aio_writev    = blkdebug_aio_writev,
-    .bdrv_aio_flush     = blkdebug_aio_flush,
 
     .bdrv_debug_event   = blkdebug_debug_event,
 };

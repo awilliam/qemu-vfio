@@ -12,6 +12,9 @@
  *          Copyright (c) 2006 Igor Kovalenko
  *
  * This code is licensed under the GNU GPL v2.
+ *
+ * Contributions after 2012-01-13 are licensed under the terms of the
+ * GNU GPL, version 2 or (at your option) any later version.
  */
 #include "hw.h"
 #include "pc.h"
@@ -335,8 +338,9 @@ static void create_shared_memory_BAR(IVShmemState *s, int fd) {
 
     ptr = mmap(0, s->ivshmem_size, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
 
-    memory_region_init_ram_ptr(&s->ivshmem, &s->dev.qdev, "ivshmem.bar2",
+    memory_region_init_ram_ptr(&s->ivshmem, "ivshmem.bar2",
                                s->ivshmem_size, ptr);
+    vmstate_register_ram(&s->ivshmem, &s->dev.qdev);
     memory_region_add_subregion(&s->bar, 0, &s->ivshmem);
 
     /* region for shared memory */
@@ -350,8 +354,8 @@ static void close_guest_eventfds(IVShmemState *s, int posn)
     guest_curr_max = s->peers[posn].nb_eventfds;
 
     for (i = 0; i < guest_curr_max; i++) {
-        kvm_set_ioeventfd_mmio_long(s->peers[posn].eventfds[i],
-                    s->mmio_addr + DOORBELL, (posn << 16) | i, 0);
+        kvm_set_ioeventfd_mmio(s->peers[posn].eventfds[i],
+                    s->mmio_addr + DOORBELL, (posn << 16) | i, 0, 4);
         close(s->peers[posn].eventfds[i]);
     }
 
@@ -451,8 +455,9 @@ static void ivshmem_read(void *opaque, const uint8_t * buf, int flags)
         /* mmap the region and map into the BAR2 */
         map_ptr = mmap(0, s->ivshmem_size, PROT_READ|PROT_WRITE, MAP_SHARED,
                                                             incoming_fd, 0);
-        memory_region_init_ram_ptr(&s->ivshmem, &s->dev.qdev,
+        memory_region_init_ram_ptr(&s->ivshmem,
                                    "ivshmem.bar2", s->ivshmem_size, map_ptr);
+        vmstate_register_ram(&s->ivshmem, &s->dev.qdev);
 
         IVSHMEM_DPRINTF("guest h/w addr = %" PRIu64 ", size = %" PRIu64 "\n",
                          s->ivshmem_offset, s->ivshmem_size);
@@ -495,8 +500,8 @@ static void ivshmem_read(void *opaque, const uint8_t * buf, int flags)
     }
 
     if (ivshmem_has_feature(s, IVSHMEM_IOEVENTFD)) {
-        if (kvm_set_ioeventfd_mmio_long(incoming_fd, s->mmio_addr + DOORBELL,
-                        (incoming_posn << 16) | guest_max_eventfd, 1) < 0) {
+        if (kvm_set_ioeventfd_mmio(incoming_fd, s->mmio_addr + DOORBELL,
+                        (incoming_posn << 16) | guest_max_eventfd, 1, 4) < 0) {
             fprintf(stderr, "ivshmem: ioeventfd not available\n");
         }
     }
@@ -504,11 +509,29 @@ static void ivshmem_read(void *opaque, const uint8_t * buf, int flags)
     return;
 }
 
+/* Select the MSI-X vectors used by device.
+ * ivshmem maps events to vectors statically, so
+ * we just enable all vectors on init and after reset. */
+static void ivshmem_use_msix(IVShmemState * s)
+{
+    int i;
+
+    if (!msix_present(&s->dev)) {
+        return;
+    }
+
+    for (i = 0; i < s->vectors; i++) {
+        msix_vector_use(&s->dev, i);
+    }
+}
+
 static void ivshmem_reset(DeviceState *d)
 {
     IVShmemState *s = DO_UPCAST(IVShmemState, dev.qdev, d);
 
     s->intrstatus = 0;
+    msix_reset(&s->dev);
+    ivshmem_use_msix(s);
     return;
 }
 
@@ -539,12 +562,8 @@ static uint64_t ivshmem_get_size(IVShmemState * s) {
     return value;
 }
 
-static void ivshmem_setup_msi(IVShmemState * s) {
-
-    int i;
-
-    /* allocate the MSI-X vectors */
-
+static void ivshmem_setup_msi(IVShmemState * s)
+{
     memory_region_init(&s->msix_bar, "ivshmem-msix", 4096);
     if (!msix_init(&s->dev, s->vectors, &s->msix_bar, 1, 0)) {
         pci_register_bar(&s->dev, 1, PCI_BASE_ADDRESS_SPACE_MEMORY,
@@ -555,13 +574,10 @@ static void ivshmem_setup_msi(IVShmemState * s) {
         exit(1);
     }
 
-    /* 'activate' the vectors */
-    for (i = 0; i < s->vectors; i++) {
-        msix_vector_use(&s->dev, i);
-    }
-
-    /* allocate Qemu char devices for receiving interrupts */
+    /* allocate QEMU char devices for receiving interrupts */
     s->eventfd_table = g_malloc0(s->vectors * sizeof(EventfdEntry));
+
+    ivshmem_use_msix(s);
 }
 
 static void ivshmem_save(QEMUFile* f, void *opaque)
@@ -585,7 +601,7 @@ static int ivshmem_load(QEMUFile* f, void *opaque, int version_id)
     IVSHMEM_DPRINTF("ivshmem_load\n");
 
     IVShmemState *proxy = opaque;
-    int ret, i;
+    int ret;
 
     if (version_id > 0) {
         return -EINVAL;
@@ -603,15 +619,20 @@ static int ivshmem_load(QEMUFile* f, void *opaque, int version_id)
 
     if (ivshmem_has_feature(proxy, IVSHMEM_MSI)) {
         msix_load(&proxy->dev, f);
-        for (i = 0; i < proxy->vectors; i++) {
-            msix_vector_use(&proxy->dev, i);
-        }
+	ivshmem_use_msix(proxy);
     } else {
         proxy->intrstatus = qemu_get_be32(f);
         proxy->intrmask = qemu_get_be32(f);
     }
 
     return 0;
+}
+
+static void ivshmem_write_config(PCIDevice *pci_dev, uint32_t address,
+				 uint32_t val, int len)
+{
+    pci_default_write_config(pci_dev, address, val, len);
+    msix_write_config(pci_dev, address, val, len);
 }
 
 static int pci_ivshmem_init(PCIDevice *dev)
@@ -739,6 +760,8 @@ static int pci_ivshmem_init(PCIDevice *dev)
 
     }
 
+    s->dev.config_write = ivshmem_write_config;
+
     return 0;
 }
 
@@ -753,6 +776,7 @@ static int pci_ivshmem_uninit(PCIDevice *dev)
 
     memory_region_destroy(&s->ivshmem_mmio);
     memory_region_del_subregion(&s->bar, &s->ivshmem);
+    vmstate_unregister_ram(&s->ivshmem, &s->dev.qdev);
     memory_region_destroy(&s->ivshmem);
     memory_region_destroy(&s->bar);
     unregister_savevm(&dev->qdev, "ivshmem", s);
@@ -760,30 +784,41 @@ static int pci_ivshmem_uninit(PCIDevice *dev)
     return 0;
 }
 
-static PCIDeviceInfo ivshmem_info = {
-    .qdev.name  = "ivshmem",
-    .qdev.size  = sizeof(IVShmemState),
-    .qdev.reset = ivshmem_reset,
-    .init       = pci_ivshmem_init,
-    .exit       = pci_ivshmem_uninit,
-    .vendor_id  = PCI_VENDOR_ID_REDHAT_QUMRANET,
-    .device_id  = 0x1110,
-    .class_id   = PCI_CLASS_MEMORY_RAM,
-    .qdev.props = (Property[]) {
-        DEFINE_PROP_CHR("chardev", IVShmemState, server_chr),
-        DEFINE_PROP_STRING("size", IVShmemState, sizearg),
-        DEFINE_PROP_UINT32("vectors", IVShmemState, vectors, 1),
-        DEFINE_PROP_BIT("ioeventfd", IVShmemState, features, IVSHMEM_IOEVENTFD, false),
-        DEFINE_PROP_BIT("msi", IVShmemState, features, IVSHMEM_MSI, true),
-        DEFINE_PROP_STRING("shm", IVShmemState, shmobj),
-        DEFINE_PROP_STRING("role", IVShmemState, role),
-        DEFINE_PROP_END_OF_LIST(),
-    }
+static Property ivshmem_properties[] = {
+    DEFINE_PROP_CHR("chardev", IVShmemState, server_chr),
+    DEFINE_PROP_STRING("size", IVShmemState, sizearg),
+    DEFINE_PROP_UINT32("vectors", IVShmemState, vectors, 1),
+    DEFINE_PROP_BIT("ioeventfd", IVShmemState, features, IVSHMEM_IOEVENTFD, false),
+    DEFINE_PROP_BIT("msi", IVShmemState, features, IVSHMEM_MSI, true),
+    DEFINE_PROP_STRING("shm", IVShmemState, shmobj),
+    DEFINE_PROP_STRING("role", IVShmemState, role),
+    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void ivshmem_register_devices(void)
+static void ivshmem_class_init(ObjectClass *klass, void *data)
 {
-    pci_qdev_register(&ivshmem_info);
+    DeviceClass *dc = DEVICE_CLASS(klass);
+    PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
+
+    k->init = pci_ivshmem_init;
+    k->exit = pci_ivshmem_uninit;
+    k->vendor_id = PCI_VENDOR_ID_REDHAT_QUMRANET;
+    k->device_id = 0x1110;
+    k->class_id = PCI_CLASS_MEMORY_RAM;
+    dc->reset = ivshmem_reset;
+    dc->props = ivshmem_properties;
 }
 
-device_init(ivshmem_register_devices)
+static TypeInfo ivshmem_info = {
+    .name          = "ivshmem",
+    .parent        = TYPE_PCI_DEVICE,
+    .instance_size = sizeof(IVShmemState),
+    .class_init    = ivshmem_class_init,
+};
+
+static void ivshmem_register_types(void)
+{
+    type_register_static(&ivshmem_info);
+}
+
+type_init(ivshmem_register_types)

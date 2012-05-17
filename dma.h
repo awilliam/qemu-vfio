@@ -11,32 +11,31 @@
 #define DMA_H
 
 #include <stdio.h>
-//#include "cpu.h"
 #include "hw/hw.h"
 #include "block.h"
 
 typedef struct ScatterGatherEntry ScatterGatherEntry;
-
-#if defined(TARGET_PHYS_ADDR_BITS)
-typedef target_phys_addr_t dma_addr_t;
-
-#define DMA_ADDR_FMT TARGET_FMT_plx
 
 typedef enum {
     DMA_DIRECTION_TO_DEVICE = 0,
     DMA_DIRECTION_FROM_DEVICE = 1,
 } DMADirection;
 
-struct ScatterGatherEntry {
-    dma_addr_t base;
-    dma_addr_t len;
-};
-
 struct QEMUSGList {
     ScatterGatherEntry *sg;
     int nsg;
     int nalloc;
-    dma_addr_t size;
+    size_t size;
+};
+
+#if defined(TARGET_PHYS_ADDR_BITS)
+typedef target_phys_addr_t dma_addr_t;
+
+#define DMA_ADDR_FMT TARGET_FMT_plx
+
+struct ScatterGatherEntry {
+    dma_addr_t base;
+    dma_addr_t len;
 };
 
 void qemu_sglist_init(QEMUSGList *qsg, int alloc_hint);
@@ -51,11 +50,17 @@ typedef BlockDriverAIOCB *DMAIOFunc(BlockDriverState *bs, int64_t sector_num,
 BlockDriverAIOCB *dma_bdrv_io(BlockDriverState *bs,
                               QEMUSGList *sg, uint64_t sector_num,
                               DMAIOFunc *io_func, BlockDriverCompletionFunc *cb,
-                              void *opaque, bool to_dev);
+                              void *opaque, DMADirection dir);
 BlockDriverAIOCB *dma_bdrv_read(BlockDriverState *bs,
                                 QEMUSGList *sg, uint64_t sector,
                                 BlockDriverCompletionFunc *cb, void *opaque);
 BlockDriverAIOCB *dma_bdrv_write(BlockDriverState *bs,
                                  QEMUSGList *sg, uint64_t sector,
                                  BlockDriverCompletionFunc *cb, void *opaque);
+uint64_t dma_buf_read(uint8_t *ptr, int32_t len, QEMUSGList *sg);
+uint64_t dma_buf_write(uint8_t *ptr, int32_t len, QEMUSGList *sg);
+
+void dma_acct_start(BlockDriverState *bs, BlockAcctCookie *cookie,
+                    QEMUSGList *sg, enum BlockAcctType type);
+
 #endif

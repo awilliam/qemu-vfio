@@ -167,7 +167,7 @@ static int alloc_refcount_block(BlockDriverState *bs,
     if (refcount_table_index < s->refcount_table_size) {
 
         uint64_t refcount_block_offset =
-            s->refcount_table[refcount_table_index];
+            s->refcount_table[refcount_table_index] & REFT_OFFSET_MASK;
 
         /* If it's already there, we're done */
         if (refcount_block_offset) {
@@ -400,7 +400,7 @@ static int alloc_refcount_block(BlockDriverState *bs,
         return ret;
     }
 
-    return new_block;
+    return 0;
 
 fail_table:
     g_free(new_table);
@@ -582,6 +582,40 @@ int64_t qcow2_alloc_clusters(BlockDriverState *bs, int64_t size)
     return offset;
 }
 
+int qcow2_alloc_clusters_at(BlockDriverState *bs, uint64_t offset,
+    int nb_clusters)
+{
+    BDRVQcowState *s = bs->opaque;
+    uint64_t cluster_index;
+    uint64_t old_free_cluster_index;
+    int i, refcount, ret;
+
+    /* Check how many clusters there are free */
+    cluster_index = offset >> s->cluster_bits;
+    for(i = 0; i < nb_clusters; i++) {
+        refcount = get_refcount(bs, cluster_index++);
+
+        if (refcount < 0) {
+            return refcount;
+        } else if (refcount != 0) {
+            break;
+        }
+    }
+
+    /* And then allocate them */
+    old_free_cluster_index = s->free_cluster_index;
+    s->free_cluster_index = cluster_index + i;
+
+    ret = update_refcount(bs, offset, i << s->cluster_bits, 1);
+    if (ret < 0) {
+        return ret;
+    }
+
+    s->free_cluster_index = old_free_cluster_index;
+
+    return i;
+}
+
 /* only used to allocate compressed sectors. We try to allocate
    contiguous sectors. size must be <= cluster_size */
 int64_t qcow2_alloc_bytes(BlockDriverState *bs, int size)
@@ -645,32 +679,35 @@ void qcow2_free_clusters(BlockDriverState *bs,
 }
 
 /*
- * free_any_clusters
- *
- * free clusters according to its type: compressed or not
- *
+ * Free a cluster using its L2 entry (handles clusters of all types, e.g.
+ * normal cluster, compressed cluster, etc.)
  */
-
 void qcow2_free_any_clusters(BlockDriverState *bs,
-    uint64_t cluster_offset, int nb_clusters)
+    uint64_t l2_entry, int nb_clusters)
 {
     BDRVQcowState *s = bs->opaque;
 
-    /* free the cluster */
-
-    if (cluster_offset & QCOW_OFLAG_COMPRESSED) {
-        int nb_csectors;
-        nb_csectors = ((cluster_offset >> s->csize_shift) &
-                       s->csize_mask) + 1;
-        qcow2_free_clusters(bs,
-            (cluster_offset & s->cluster_offset_mask) & ~511,
-            nb_csectors * 512);
-        return;
+    switch (qcow2_get_cluster_type(l2_entry)) {
+    case QCOW2_CLUSTER_COMPRESSED:
+        {
+            int nb_csectors;
+            nb_csectors = ((l2_entry >> s->csize_shift) &
+                           s->csize_mask) + 1;
+            qcow2_free_clusters(bs,
+                (l2_entry & s->cluster_offset_mask) & ~511,
+                nb_csectors * 512);
+        }
+        break;
+    case QCOW2_CLUSTER_NORMAL:
+        qcow2_free_clusters(bs, l2_entry & L2E_OFFSET_MASK,
+                            nb_clusters << s->cluster_bits);
+        break;
+    case QCOW2_CLUSTER_UNALLOCATED:
+    case QCOW2_CLUSTER_ZERO:
+        break;
+    default:
+        abort();
     }
-
-    qcow2_free_clusters(bs, cluster_offset, nb_clusters << s->cluster_bits);
-
-    return;
 }
 
 
@@ -700,6 +737,10 @@ int qcow2_update_snapshot_refcount(BlockDriverState *bs,
     l2_table = NULL;
     l1_table = NULL;
     l1_size2 = l1_size * sizeof(uint64_t);
+
+    /* WARNING: qcow2_snapshot_goto relies on this function not using the
+     * l1_table_offset when it is the current s->l1_table_offset! Be careful
+     * when changing this! */
     if (l1_table_offset != s->l1_table_offset) {
         if (l1_size2 != 0) {
             l1_table = g_malloc0(align_offset(l1_size2, 512));
@@ -726,7 +767,7 @@ int qcow2_update_snapshot_refcount(BlockDriverState *bs,
         l2_offset = l1_table[i];
         if (l2_offset) {
             old_l2_offset = l2_offset;
-            l2_offset &= ~QCOW_OFLAG_COPIED;
+            l2_offset &= L1E_OFFSET_MASK;
 
             ret = qcow2_cache_get(bs, s->l2_table_cache, l2_offset,
                 (void**) &l2_table);
@@ -758,10 +799,11 @@ int qcow2_update_snapshot_refcount(BlockDriverState *bs,
                         /* compressed clusters are never modified */
                         refcount = 2;
                     } else {
+                        uint64_t cluster_index = (offset & L2E_OFFSET_MASK) >> s->cluster_bits;
                         if (addend != 0) {
-                            refcount = update_cluster_refcount(bs, offset >> s->cluster_bits, addend);
+                            refcount = update_cluster_refcount(bs, cluster_index, addend);
                         } else {
-                            refcount = get_refcount(bs, offset >> s->cluster_bits);
+                            refcount = get_refcount(bs, cluster_index);
                         }
 
                         if (refcount < 0) {
@@ -819,7 +861,8 @@ fail:
     qcow2_cache_set_writethrough(bs, s->refcount_block_cache,
         old_refcount_writethrough);
 
-    if (l1_modified) {
+    /* Update L1 only if it isn't deleted anyway (addend = -1) */
+    if (addend >= 0 && l1_modified) {
         for(i = 0; i < l1_size; i++)
             cpu_to_be64s(&l1_table[i]);
         if (bdrv_pwrite_sync(bs->file, l1_table_offset, l1_table,
@@ -898,7 +941,7 @@ static int check_refcounts_l2(BlockDriverState *bs, BdrvCheckResult *res,
     int check_copied)
 {
     BDRVQcowState *s = bs->opaque;
-    uint64_t *l2_table, offset;
+    uint64_t *l2_table, l2_entry;
     int i, l2_size, nb_csectors, refcount;
 
     /* Read L2 table from disk */
@@ -910,54 +953,70 @@ static int check_refcounts_l2(BlockDriverState *bs, BdrvCheckResult *res,
 
     /* Do the actual checks */
     for(i = 0; i < s->l2_size; i++) {
-        offset = be64_to_cpu(l2_table[i]);
-        if (offset != 0) {
-            if (offset & QCOW_OFLAG_COMPRESSED) {
-                /* Compressed clusters don't have QCOW_OFLAG_COPIED */
-                if (offset & QCOW_OFLAG_COPIED) {
-                    fprintf(stderr, "ERROR: cluster %" PRId64 ": "
-                        "copied flag must never be set for compressed "
-                        "clusters\n", offset >> s->cluster_bits);
-                    offset &= ~QCOW_OFLAG_COPIED;
-                    res->corruptions++;
+        l2_entry = be64_to_cpu(l2_table[i]);
+
+        switch (qcow2_get_cluster_type(l2_entry)) {
+        case QCOW2_CLUSTER_COMPRESSED:
+            /* Compressed clusters don't have QCOW_OFLAG_COPIED */
+            if (l2_entry & QCOW_OFLAG_COPIED) {
+                fprintf(stderr, "ERROR: cluster %" PRId64 ": "
+                    "copied flag must never be set for compressed "
+                    "clusters\n", l2_entry >> s->cluster_bits);
+                l2_entry &= ~QCOW_OFLAG_COPIED;
+                res->corruptions++;
+            }
+
+            /* Mark cluster as used */
+            nb_csectors = ((l2_entry >> s->csize_shift) &
+                           s->csize_mask) + 1;
+            l2_entry &= s->cluster_offset_mask;
+            inc_refcounts(bs, res, refcount_table, refcount_table_size,
+                l2_entry & ~511, nb_csectors * 512);
+            break;
+
+        case QCOW2_CLUSTER_ZERO:
+            if ((l2_entry & L2E_OFFSET_MASK) == 0) {
+                break;
+            }
+            /* fall through */
+
+        case QCOW2_CLUSTER_NORMAL:
+        {
+            /* QCOW_OFLAG_COPIED must be set iff refcount == 1 */
+            uint64_t offset = l2_entry & L2E_OFFSET_MASK;
+
+            if (check_copied) {
+                refcount = get_refcount(bs, offset >> s->cluster_bits);
+                if (refcount < 0) {
+                    fprintf(stderr, "Can't get refcount for offset %"
+                        PRIx64 ": %s\n", l2_entry, strerror(-refcount));
+                    goto fail;
                 }
-
-                /* Mark cluster as used */
-                nb_csectors = ((offset >> s->csize_shift) &
-                               s->csize_mask) + 1;
-                offset &= s->cluster_offset_mask;
-                inc_refcounts(bs, res, refcount_table, refcount_table_size,
-                    offset & ~511, nb_csectors * 512);
-            } else {
-                /* QCOW_OFLAG_COPIED must be set iff refcount == 1 */
-                if (check_copied) {
-                    uint64_t entry = offset;
-                    offset &= ~QCOW_OFLAG_COPIED;
-                    refcount = get_refcount(bs, offset >> s->cluster_bits);
-                    if (refcount < 0) {
-                        fprintf(stderr, "Can't get refcount for offset %"
-                            PRIx64 ": %s\n", entry, strerror(-refcount));
-                        goto fail;
-                    }
-                    if ((refcount == 1) != ((entry & QCOW_OFLAG_COPIED) != 0)) {
-                        fprintf(stderr, "ERROR OFLAG_COPIED: offset=%"
-                            PRIx64 " refcount=%d\n", entry, refcount);
-                        res->corruptions++;
-                    }
-                }
-
-                /* Mark cluster as used */
-                offset &= ~QCOW_OFLAG_COPIED;
-                inc_refcounts(bs, res, refcount_table,refcount_table_size,
-                    offset, s->cluster_size);
-
-                /* Correct offsets are cluster aligned */
-                if (offset & (s->cluster_size - 1)) {
-                    fprintf(stderr, "ERROR offset=%" PRIx64 ": Cluster is not "
-                        "properly aligned; L2 entry corrupted.\n", offset);
+                if ((refcount == 1) != ((l2_entry & QCOW_OFLAG_COPIED) != 0)) {
+                    fprintf(stderr, "ERROR OFLAG_COPIED: offset=%"
+                        PRIx64 " refcount=%d\n", l2_entry, refcount);
                     res->corruptions++;
                 }
             }
+
+            /* Mark cluster as used */
+            inc_refcounts(bs, res, refcount_table,refcount_table_size,
+                offset, s->cluster_size);
+
+            /* Correct offsets are cluster aligned */
+            if (offset & (s->cluster_size - 1)) {
+                fprintf(stderr, "ERROR offset=%" PRIx64 ": Cluster is not "
+                    "properly aligned; L2 entry corrupted.\n", offset);
+                res->corruptions++;
+            }
+            break;
+        }
+
+        case QCOW2_CLUSTER_UNALLOCATED:
+            break;
+
+        default:
+            abort();
         }
     }
 
@@ -1028,7 +1087,7 @@ static int check_refcounts_l1(BlockDriverState *bs,
             }
 
             /* Mark L2 table as used */
-            l2_offset &= ~QCOW_OFLAG_COPIED;
+            l2_offset &= L1E_OFFSET_MASK;
             inc_refcounts(bs, res, refcount_table, refcount_table_size,
                 l2_offset, s->cluster_size);
 

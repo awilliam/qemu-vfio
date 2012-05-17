@@ -22,12 +22,12 @@
 
 #if defined(CONFIG_USER_ONLY)
 
-void do_interrupt(CPUState *env1)
+void do_interrupt(CPUM68KState *env1)
 {
     env1->exception_index = -1;
 }
 
-void do_interrupt_m68k_hardirq(CPUState *env1)
+void do_interrupt_m68k_hardirq(CPUM68KState *env1)
 {
 }
 
@@ -55,12 +55,11 @@ extern int semihosting_enabled;
    NULL, it means that the function was called in C code (i.e. not
    from generated code or from helper.c) */
 /* XXX: fix it to restore all registers */
-void tlb_fill(CPUState *env1, target_ulong addr, int is_write, int mmu_idx,
-              void *retaddr)
+void tlb_fill(CPUM68KState *env1, target_ulong addr, int is_write, int mmu_idx,
+              uintptr_t retaddr)
 {
     TranslationBlock *tb;
-    CPUState *saved_env;
-    unsigned long pc;
+    CPUM68KState *saved_env;
     int ret;
 
     saved_env = env;
@@ -69,12 +68,11 @@ void tlb_fill(CPUState *env1, target_ulong addr, int is_write, int mmu_idx,
     if (unlikely(ret)) {
         if (retaddr) {
             /* now we have a real cpu fault */
-            pc = (unsigned long)retaddr;
-            tb = tb_find_pc(pc);
+            tb = tb_find_pc(retaddr);
             if (tb) {
                 /* the PC is inside the translated code. It means that we have
                    a virtual CPU fault */
-                cpu_restore_state(tb, env, pc);
+                cpu_restore_state(tb, env, retaddr);
             }
         }
         cpu_loop_exit(env);
@@ -161,9 +159,9 @@ static void do_interrupt_all(int is_hw)
     env->pc = ldl_kernel(env->vbr + vector);
 }
 
-void do_interrupt(CPUState *env1)
+void do_interrupt(CPUM68KState *env1)
 {
-    CPUState *saved_env;
+    CPUM68KState *saved_env;
 
     saved_env = env;
     env = env1;
@@ -171,9 +169,9 @@ void do_interrupt(CPUState *env1)
     env = saved_env;
 }
 
-void do_interrupt_m68k_hardirq(CPUState *env1)
+void do_interrupt_m68k_hardirq(CPUM68KState *env1)
 {
-    CPUState *saved_env;
+    CPUM68KState *saved_env;
 
     saved_env = env;
     env = env1;
@@ -193,7 +191,7 @@ void HELPER(raise_exception)(uint32_t tt)
     raise_exception(tt);
 }
 
-void HELPER(divu)(CPUState *env, uint32_t word)
+void HELPER(divu)(CPUM68KState *env, uint32_t word)
 {
     uint32_t num;
     uint32_t den;
@@ -223,7 +221,7 @@ void HELPER(divu)(CPUState *env, uint32_t word)
     env->cc_dest = flags;
 }
 
-void HELPER(divs)(CPUState *env, uint32_t word)
+void HELPER(divs)(CPUM68KState *env, uint32_t word)
 {
     int32_t num;
     int32_t den;

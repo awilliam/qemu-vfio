@@ -23,25 +23,26 @@
 #if !defined(__HW_SPAPR_PCI_H__)
 #define __HW_SPAPR_PCI_H__
 
+#include "hw/pci.h"
 #include "hw/pci_host.h"
 #include "hw/xics.h"
-
-#define SPAPR_PCI_NUM_LSI   16
 
 typedef struct sPAPRPHBState {
     SysBusDevice busdev;
     PCIHostState host_state;
 
     uint64_t buid;
+    char *busname;
+    char *dtbusname;
 
     MemoryRegion memspace, iospace;
-    target_phys_addr_t mem_win_addr, io_win_addr;
+    target_phys_addr_t mem_win_addr, mem_win_size, io_win_addr, io_win_size;
     MemoryRegion memwindow, iowindow;
 
     struct {
         uint32_t dt_irq;
         qemu_irq qirq;
-    } lsi_table[SPAPR_PCI_NUM_LSI];
+    } lsi_table[PCI_NUM_PINS];
 
     QLIST_ENTRY(sPAPRPHBState) list;
 } sPAPRPHBState;

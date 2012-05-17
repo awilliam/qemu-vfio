@@ -9,6 +9,8 @@
  * This work is licensed under the terms of the GNU GPL, version 2.  See
  * the COPYING file in the top-level directory.
  *
+ * Contributions after 2012-01-13 are licensed under the terms of the
+ * GNU GPL, version 2 or (at your option) any later version.
  */
 
 #include <sys/ioctl.h>
@@ -128,8 +130,8 @@ static ssize_t handle_aiocb_ioctl(struct qemu_paiocb *aiocb)
         return -errno;
 
     /*
-     * This looks weird, but the aio code only consideres a request
-     * successful if it has written the number full number of bytes.
+     * This looks weird, but the aio code only considers a request
+     * successful if it has written the full number of bytes.
      *
      * Now we overload aio_nbytes as aio_ioctl_cmd for the ioctl command,
      * so in fact we return the ioctl command here to make posix_aio_read()
@@ -466,26 +468,37 @@ static int qemu_paio_error(struct qemu_paiocb *aiocb)
     return ret;
 }
 
-static int posix_aio_process_queue(void *opaque)
+static void posix_aio_read(void *opaque)
 {
     PosixAioState *s = opaque;
     struct qemu_paiocb *acb, **pacb;
     int ret;
-    int result = 0;
+    ssize_t len;
+
+    /* read all bytes from signal pipe */
+    for (;;) {
+        char bytes[16];
+
+        len = read(s->rfd, bytes, sizeof(bytes));
+        if (len == -1 && errno == EINTR)
+            continue; /* try again */
+        if (len == sizeof(bytes))
+            continue; /* more to read */
+        break;
+    }
 
     for(;;) {
         pacb = &s->first_aio;
         for(;;) {
             acb = *pacb;
             if (!acb)
-                return result;
+                return;
 
             ret = qemu_paio_error(acb);
             if (ret == ECANCELED) {
                 /* remove the request */
                 *pacb = acb->next;
                 qemu_aio_release(acb);
-                result = 1;
             } else if (ret != EINPROGRESS) {
                 /* end of aio */
                 if (ret == 0) {
@@ -505,35 +518,12 @@ static int posix_aio_process_queue(void *opaque)
                 /* call the callback */
                 acb->common.cb(acb->common.opaque, ret);
                 qemu_aio_release(acb);
-                result = 1;
                 break;
             } else {
                 pacb = &acb->next;
             }
         }
     }
-
-    return result;
-}
-
-static void posix_aio_read(void *opaque)
-{
-    PosixAioState *s = opaque;
-    ssize_t len;
-
-    /* read all bytes from signal pipe */
-    for (;;) {
-        char bytes[16];
-
-        len = read(s->rfd, bytes, sizeof(bytes));
-        if (len == -1 && errno == EINTR)
-            continue; /* try again */
-        if (len == sizeof(bytes))
-            continue; /* more to read */
-        break;
-    }
-
-    posix_aio_process_queue(s);
 }
 
 static int posix_aio_flush(void *opaque)
@@ -611,8 +601,6 @@ BlockDriverAIOCB *paio_submit(BlockDriverState *bs, int fd,
     struct qemu_paiocb *acb;
 
     acb = qemu_aio_get(&raw_aio_pool, bs, cb, opaque);
-    if (!acb)
-        return NULL;
     acb->aio_type = type;
     acb->aio_fildes = fd;
 
@@ -638,8 +626,6 @@ BlockDriverAIOCB *paio_ioctl(BlockDriverState *bs, int fd,
     struct qemu_paiocb *acb;
 
     acb = qemu_aio_get(&raw_aio_pool, bs, cb, opaque);
-    if (!acb)
-        return NULL;
     acb->aio_type = QEMU_AIO_IOCTL;
     acb->aio_fildes = fd;
     acb->aio_offset = 0;
@@ -677,8 +663,7 @@ int paio_init(void)
     fcntl(s->rfd, F_SETFL, O_NONBLOCK);
     fcntl(s->wfd, F_SETFL, O_NONBLOCK);
 
-    qemu_aio_set_fd_handler(s->rfd, posix_aio_read, NULL, posix_aio_flush,
-        posix_aio_process_queue, s);
+    qemu_aio_set_fd_handler(s->rfd, posix_aio_read, NULL, posix_aio_flush, s);
 
     ret = pthread_attr_init(&attr);
     if (ret)

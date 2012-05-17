@@ -246,6 +246,9 @@ void slirp_cleanup(Slirp *slirp)
 
     unregister_savevm(NULL, "slirp", slirp);
 
+    ip_cleanup(slirp);
+    m_cleanup(slirp);
+
     g_free(slirp->tftp_prefix);
     g_free(slirp->bootp_filename);
     g_free(slirp);
@@ -254,6 +257,13 @@ void slirp_cleanup(Slirp *slirp)
 #define CONN_CANFSEND(so) (((so)->so_state & (SS_FCANTSENDMORE|SS_ISFCONNECTED)) == SS_ISFCONNECTED)
 #define CONN_CANFRCV(so) (((so)->so_state & (SS_FCANTRCVMORE|SS_ISFCONNECTED)) == SS_ISFCONNECTED)
 #define UPD_NFDS(x) if (nfds < (x)) nfds = (x)
+
+void slirp_update_timeout(uint32_t *timeout)
+{
+    if (!QTAILQ_EMPTY(&slirp_instances)) {
+        *timeout = MIN(1000, *timeout);
+    }
+}
 
 void slirp_select_fill(int *pnfds,
                        fd_set *readfds, fd_set *writefds, fd_set *xfds)
@@ -581,12 +591,7 @@ void slirp_select_poll(fd_set *readfds, fd_set *writefds, fd_set *xfds,
                 }
 	}
 
-	/*
-	 * See if we can start outputting
-	 */
-	if (slirp->if_queued) {
-	    if_start(slirp);
-	}
+        if_start(slirp);
     }
 
 	/* clear global file descriptor sets.
