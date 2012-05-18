@@ -676,7 +676,6 @@ static int vfio_dma_unmap(VFIOContainer *container,
     return 0;
 }
 
-#ifndef TARGET_PPC64
 static void vfio_listener_dummy1(MemoryListener *listener)
 {
     /* We don't do batching (begin/commit) or care about logging */
@@ -751,7 +750,6 @@ static void vfio_listener_region_del(MemoryListener *listener,
                      container, iova, size, ret, strerror(errno));
     }
 }
-#endif /* !TARGET_PPC64 */
 
 /*
  * Interrupt setup
@@ -1277,55 +1275,57 @@ static int vfio_connect_container(VFIOGroup *group, bool prefer_shared)
         return -1;
     }
 
-    ret = ioctl(fd, VFIO_CHECK_EXTENSION, VFIO_X86_IOMMU);
-    if (!ret) {
-        error_report("vfio: no support for require iommu model\n");
-        close(fd);
-        return -1;
-    }
-
-    ret = ioctl(group->fd, VFIO_GROUP_SET_CONTAINER, &fd);
-    if (ret) {
-        error_report("vfio: failed to set group container: %s\n",
-                     strerror(errno));
-        close(fd);
-        return -1;
-    }
-
-    ret = ioctl(fd, VFIO_SET_IOMMU, VFIO_X86_IOMMU);
-    if (ret) {
-        error_report("vfio: failed to set iommu for container: %s\n",
-                     strerror(errno));
-        close(fd);
-        return -1;
-    }
-
     container = g_malloc0(sizeof(*container));
     container->fd = fd;
+
+    if (ioctl(fd, VFIO_CHECK_EXTENSION, VFIO_X86_IOMMU)) {
+        ret = ioctl(group->fd, VFIO_GROUP_SET_CONTAINER, &fd);
+        if (ret) {
+            error_report("vfio: failed to set group container: %s\n",
+                         strerror(errno));
+            g_free(container);
+            close(fd);
+            return -1;
+        }
+
+        ret = ioctl(fd, VFIO_SET_IOMMU, VFIO_X86_IOMMU);
+        if (ret) {
+            error_report("vfio: failed to set iommu for container: %s\n",
+                         strerror(errno));
+            g_free(container);
+            close(fd);
+            return -1;
+        }
+
+        container->listener = (MemoryListener) {
+            .begin = vfio_listener_dummy1,
+            .commit = vfio_listener_dummy1,
+            .region_add = vfio_listener_region_add,
+            .region_del = vfio_listener_region_del,
+            .region_nop = vfio_listener_dummy2,
+            .log_start = vfio_listener_dummy2,
+            .log_stop = vfio_listener_dummy2,
+            .log_sync = vfio_listener_dummy2,
+            .log_global_start = vfio_listener_dummy1,
+            .log_global_stop = vfio_listener_dummy1,
+            .eventfd_add = vfio_listener_dummy3,
+            .eventfd_del =vfio_listener_dummy3,
+        };
+
+        memory_listener_register(&container->listener, get_system_memory());
+
+    } else {
+        error_report("vfio: No available IOMMU models\n");
+        g_free(container);
+        close(fd);
+        return -1;
+    }
+
     QLIST_INIT(&container->group_list);
     QLIST_INSERT_HEAD(&container_list, container, next);
 
     group->container = container;
     QLIST_INSERT_HEAD(&container->group_list, group, container_next);
-
-#ifndef TARGET_PPC64
-    container->listener = (MemoryListener) {
-        .begin = vfio_listener_dummy1,
-        .commit = vfio_listener_dummy1,
-        .region_add = vfio_listener_region_add,
-        .region_del = vfio_listener_region_del,
-        .region_nop = vfio_listener_dummy2,
-        .log_start = vfio_listener_dummy2,
-        .log_stop = vfio_listener_dummy2,
-        .log_sync = vfio_listener_dummy2,
-        .log_global_start = vfio_listener_dummy1,
-        .log_global_stop = vfio_listener_dummy1,
-        .eventfd_add = vfio_listener_dummy3,
-        .eventfd_del =vfio_listener_dummy3,
-    };
-
-    memory_listener_register(&container->listener, get_system_memory());
-#endif
 
     return 0;
 }
@@ -1343,9 +1343,9 @@ static void vfio_disconnect_container(VFIOGroup *group)
     group->container = NULL;
 
     if (QLIST_EMPTY(&container->group_list)) {
-#ifndef TARGET_PPC64
-        memory_listener_unregister(&container->listener);
-#endif
+        if (container->listener.begin) {
+            memory_listener_unregister(&container->listener);
+        }
         QLIST_REMOVE(container, next);
         DPRINTF("vfio_disconnect_container: close container->fd\n");
         close(container->fd);
