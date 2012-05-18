@@ -465,8 +465,23 @@ static void vfio_resource_write(void *opaque, target_phys_addr_t addr,
                                 uint64_t data, unsigned size)
 {
     PCIResource *res = opaque;
+    uint8_t tmp[8];
 
-    if (pwrite(res->fd, &data, size, res->offset + addr) != size) {
+    switch (size) {
+    case 1:
+        *tmp = data & 0xff;
+        break;
+    case 2:
+        *(uint16_t *)tmp = cpu_to_le16(data);
+        break;
+    case 4:
+        *(uint32_t *)tmp = cpu_to_le32(data);
+        break;
+    default:
+        hw_error("vfio: unsupported write size, %d bytes\n", size);
+    }
+
+    if (pwrite(res->fd, tmp, size, res->offset + addr) != size) {
         fprintf(stderr, "%s(,0x%"PRIx64", 0x%"PRIx64", %d) failed: %s\n",
                 __FUNCTION__, addr, data, size, strerror(errno));
     }
@@ -479,12 +494,27 @@ static uint64_t vfio_resource_read(void *opaque,
                                    target_phys_addr_t addr, unsigned size)
 {
     PCIResource *res = opaque;
+    uint8_t tmp[8];
     uint64_t data = 0;
 
-    if (pread(res->fd, &data, size, res->offset + addr) != size) {
+    if (pread(res->fd, tmp, size, res->offset + addr) != size) {
         fprintf(stderr, "%s(,0x%"PRIx64", %d) failed: %s\n",
                 __FUNCTION__, addr, size, strerror(errno));
         return (uint64_t)-1;
+    }
+
+    switch (size) {
+    case 1:
+        data = tmp[0];
+        break;
+    case 2:
+        data = le16_to_cpu(*(uint16_t *)tmp);
+        break;
+    case 4:
+        data = le32_to_cpu(*(uint32_t *)tmp);
+        break;
+    default:
+        hw_error("vfio: unsupported read size, %d bytes\n", size);
     }
 
     DPRINTF("%s(BAR%d+0x%"PRIx64", %d) = 0x%"PRIx64"\n",
@@ -496,7 +526,7 @@ static uint64_t vfio_resource_read(void *opaque,
 static const MemoryRegionOps vfio_resource_ops = {
     .read = vfio_resource_read,
     .write = vfio_resource_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+    .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
 /*
