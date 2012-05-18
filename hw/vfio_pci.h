@@ -5,6 +5,7 @@
 #include "qemu-queue.h"
 #include "pci.h"
 #include "ioapic.h"
+#include "event_notifier.h"
 
 typedef struct PCIHostDevice {
     uint16_t seg;

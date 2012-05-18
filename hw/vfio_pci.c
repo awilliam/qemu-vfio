@@ -540,7 +540,7 @@ static uint32_t vfio_pci_read_config(PCIDevice *pdev, uint32_t addr, int len)
         }
     }
 
-    DPRINTF("%s(%04x:%02x:%02x.%x, 0x%x, 0x%x) %x\n", __FUNCTION__,
+    DPRINTF("%s(%04x:%02x:%02x.%x, @0x%x, len=0x%x) %x\n", __FUNCTION__,
             vdev->host.seg, vdev->host.bus, vdev->host.dev,
             vdev->host.func, addr, len, val);
     return val;
@@ -552,7 +552,7 @@ static void vfio_pci_write_config(PCIDevice *pdev, uint32_t addr,
     VFIODevice *vdev = DO_UPCAST(VFIODevice, pdev, pdev);
     uint32_t val_le = cpu_to_le32(val);
 
-    DPRINTF("%s(%04x:%02x:%02x.%x, 0x%x, 0x%x, 0x%x)\n", __FUNCTION__,
+    DPRINTF("%s(%04x:%02x:%02x.%x, @0x%x, 0x%x, len=0x%x)\n", __FUNCTION__,
             vdev->host.seg, vdev->host.bus, vdev->host.dev,
             vdev->host.func, addr, val, len);
 
@@ -1616,7 +1616,7 @@ static int vfio_initfn(struct PCIDevice *pdev)
     }
 #endif
 
-    if (vfio_setup_msi(vdev))
+    if (msi_supported && vfio_setup_msi(vdev))
         goto out;
 
     if (vfio_map_resources(vdev))
