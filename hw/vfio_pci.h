@@ -53,7 +53,7 @@ struct VFIOGroup;
 
 typedef struct VFIOContainer {
     int fd;
-    CPUPhysMemoryClient client;
+    MemoryListener listener;
     QLIST_HEAD(, VFIOGroup) group_list;
     QLIST_ENTRY(VFIOContainer) next;
 } VFIOContainer;

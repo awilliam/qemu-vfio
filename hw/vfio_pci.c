@@ -33,6 +33,7 @@
 
 #include "config.h"
 #include "event_notifier.h"
+#include "exec-memory.h"
 #include "hw.h"
 #include "kvm.h"
 #include "memory.h"
@@ -306,7 +307,7 @@ static void vfio_disable_intx(VFIODevice *vdev)
 
     ioctl(vdev->fd, VFIO_DEVICE_SET_IRQS, &irq_set);
 
-    pci_remove_irq_update_notifier(&vdev->pdev, &vdev->intx.update_irq);
+    pci_remove_irq_update_notifier(&vdev->intx.update_irq);
     ioapic_remove_gsi_eoi_notifier(&vdev->intx.eoi, vdev->intx.irq);
 
     fd = event_notifier_get_fd(&vdev->intx.interrupt);
@@ -606,15 +607,15 @@ static void vfio_pci_write_config(PCIDevice *pdev, uint32_t addr,
  * DMA
  */
 static int vfio_dma_map(VFIOContainer *container,
-                        target_phys_addr_t start_addr,
-                        ram_addr_t size, ram_addr_t phys_offset)
+                        target_phys_addr_t iova,
+                        ram_addr_t size, void* vaddr)
 {
     struct vfio_iommu_x86_dma_map map =
         {
             .argsz = sizeof(map),
             .flags = VFIO_DMA_MAP_FLAG_READ | VFIO_DMA_MAP_FLAG_WRITE,
-            .vaddr = (uintptr_t)qemu_get_ram_ptr(phys_offset),
-            .iova = start_addr,
+            .vaddr = (__u64)vaddr,
+            .iova = iova,
             .size = size,
         };
 
@@ -627,14 +628,13 @@ static int vfio_dma_map(VFIOContainer *container,
 }
 
 static int vfio_dma_unmap(VFIOContainer *container,
-                          target_phys_addr_t start_addr,
-                          ram_addr_t size, ram_addr_t phys_offset)
+                          target_phys_addr_t iova, ram_addr_t size)
 {
     struct vfio_iommu_x86_dma_unmap unmap =
         {
             .argsz = sizeof(unmap),
             .flags = 0,
-            .iova = start_addr,
+            .iova = iova,
             .size = size,
         };
 
@@ -646,87 +646,82 @@ static int vfio_dma_unmap(VFIOContainer *container,
     return 0;
 }
 
-static void vfio_client_set_memory(struct CPUPhysMemoryClient *client,
-                                   target_phys_addr_t start_addr,
-                                   ram_addr_t size, ram_addr_t phys_offset,
-                                   bool log_dirty)
+#ifndef TARGET_PPC64
+static void vfio_listener_dummy1(MemoryListener *listener)
 {
-    VFIOContainer *container = container_of(client, VFIOContainer, client);
-    ram_addr_t flags = phys_offset & ~TARGET_PAGE_MASK;
+    /* We don't do batching (begin/commit) or care about logging */
+}
+
+static void vfio_listener_dummy2(MemoryListener *listener,
+                                 MemoryRegionSection *section)
+{
+    /* We don't do logging or care about nops */
+}
+
+static void vfio_listener_dummy3(MemoryListener *listener,
+                                 MemoryRegionSection *section,
+                                 bool match_data, uint64_t data, int fd)
+{
+    /* We don't care about eventfds */
+}
+ 
+static bool vfio_listener_skipped_section(MemoryRegionSection *section)
+{
+    return (section->address_space != get_system_memory() ||
+            !memory_region_is_ram(section->mr));
+}
+
+static void vfio_listener_region_add(MemoryListener *listener,
+                                     MemoryRegionSection *section)
+{
+    VFIOContainer *container = container_of(listener, VFIOContainer, listener);
+    target_phys_addr_t iova = section->offset_within_address_space;
+    ram_addr_t size = section->size;
+    void *vaddr;
     int ret;
 
-    if ((start_addr | size) & ~TARGET_PAGE_MASK) {
+    if (vfio_listener_skipped_section(section)) {
+        DPRINTF("vfio: SKIPPING region_add %016lx - %016lx\n",
+                iova, iova + size - 1);
         return;
     }
 
-    if (flags == IO_MEM_RAM) {
-        ret = vfio_dma_map(container, start_addr, size, phys_offset);
-        if (!ret) {
-            return;
-        }
+    vaddr = memory_region_get_ram_ptr(section->mr) +
+            section->offset_within_region;
 
-        if (ret == -EBUSY) {
-            /* EBUSY means the target address is already set.  Check if the
-             * current mapping has changed.  If it hasn't, do nothing.  If it
-             * has, unmap and remap the new phys_offset for each page.  On x86
-             * this typically only happens for remapping of areas below 1MB. */
-            target_phys_addr_t curr = start_addr;
-            target_phys_addr_t end = start_addr + size;
-            ram_addr_t curr_phys = phys_offset;
+    DPRINTF("vfio: region_add %016lx - %016lx [%p]\n",
+            iova, iova + size - 1, vaddr);
 
-            while (curr < end) {
-                ram_addr_t phys = cpu_get_physical_page_desc(curr);
-
-                if (phys != curr_phys) {
-                    vfio_dma_unmap(container, curr, TARGET_PAGE_SIZE, phys);
-                    ret = vfio_dma_map(container, curr,
-                                       TARGET_PAGE_SIZE, curr_phys);
-                    if (ret) {
-                        break;
-                    }
-                }
-                curr += TARGET_PAGE_SIZE;
-                curr_phys += TARGET_PAGE_SIZE;
-            }
-
-            if (curr >= end) {
-                return;
-            }
-        }
-
-        vfio_dma_unmap(container, start_addr, size, phys_offset);
-
-        fprintf(stderr, "%s: "
-                "Failed to map region %llx - %llx: %s\n", __FUNCTION__,
-                (unsigned long long)start_addr,
-                (unsigned long long)(start_addr + size - 1),
-                strerror(-ret));
-
-    } else if (flags == IO_MEM_UNASSIGNED) {
-        ret = vfio_dma_unmap(container, start_addr, size, phys_offset);
-        if (!ret) {
-            return;
-        }
-        fprintf(stderr, "%s: "
-                "Failed to unmap region %llx - %llx: %s\n", __FUNCTION__,
-                (unsigned long long)start_addr,
-                (unsigned long long)(start_addr + size - 1),
-                strerror(-ret));
+    ret = vfio_dma_map(container, iova, size, vaddr);
+    if (ret) {
+        error_report("vfio_dma_map(%p, 0x%016lx, 0x%lx, %p) = %d (%s)\n",
+                     container, iova, size, vaddr, ret, strerror(errno));
     }
 }
 
-static int vfio_client_sync_dirty_bitmap(struct CPUPhysMemoryClient *client,
-                                         target_phys_addr_t start_addr,
-                                         target_phys_addr_t end_addr)
+static void vfio_listener_region_del(MemoryListener *listener,
+                                     MemoryRegionSection *section)
 {
-    return 0;
-}
+    VFIOContainer *container = container_of(listener, VFIOContainer, listener);
+    target_phys_addr_t iova = section->offset_within_address_space;
+    ram_addr_t size = section->size;
+    int ret;
 
-static int vfio_client_migration_log(struct CPUPhysMemoryClient *client,
-                                     int enable)
-{
-    return 0;
+    if (vfio_listener_skipped_section(section)) {
+        DPRINTF("vfio: SKIPPING region_del %016lx - %016lx\n",
+                iova, iova + size - 1);
+        return;
+    }
+
+    DPRINTF("vfio: region_del %016lx - %016lx\n", iova, iova + size - 1);
+
+    ret = vfio_dma_unmap(container, iova, size);
+    if (ret) {
+        error_report("vfio_dma_unmap(%p, 0x%016lx, 0x%lx) = %d (%s)\n",
+                     container, iova, size, ret, strerror(errno));
+    }
 }
+#endif /* !TARGET_PPC64 */
 
 /*
  * Interrupt setup
@@ -855,7 +850,7 @@ static void vfio_map_region(VFIODevice *vdev, int bar, char *name)
             goto slow;
         }
 
-        memory_region_init_ram_ptr(&res->region, &vdev->pdev.qdev,
+        memory_region_init_ram_ptr(&res->region,
                                    name, res->size, res->virtbase);
         return; /* Done */
     }
@@ -870,7 +865,7 @@ static void vfio_map_region(VFIODevice *vdev, int bar, char *name)
             goto slow;
         }
 
-        memory_region_init_ram_ptr(&vdev->msix->region_lo, &vdev->pdev.qdev,
+        memory_region_init_ram_ptr(&vdev->msix->region_lo,
                                    "lo", vdev->msix->offset, res->virtbase);
         memory_region_add_subregion(&res->region, 0, &vdev->msix->region_lo);
     }
@@ -892,7 +887,7 @@ static void vfio_map_region(VFIODevice *vdev, int bar, char *name)
             goto slow;
         }
 
-        memory_region_init_ram_ptr(&vdev->msix->region_hi, &vdev->pdev.qdev,
+        memory_region_init_ram_ptr(&vdev->msix->region_hi,
                                    "hi", size, vdev->msix->virtbase);
         memory_region_add_subregion(&res->region, offset,
                                     &vdev->msix->region_hi);
@@ -921,6 +916,7 @@ static int vfio_map_resources(VFIODevice *vdev)
         uint32_t bar;
         uint8_t offset;
         int ret, space;
+        const VMStateDescription *vmsd;
         char name[32];
 
         res = &vdev->resources[i];
@@ -942,12 +938,13 @@ static int vfio_map_resources(VFIODevice *vdev)
         bar = le32_to_cpu(bar);
         space = bar & PCI_BASE_ADDRESS_SPACE;
 
-        if (vdev->pdev.qdev.info->vmsd) {
-            snprintf(name, sizeof(name), "%s.bar%d",
-                     vdev->pdev.qdev.info->vmsd->name, i);
+        vmsd = qdev_get_vmsd(DEVICE(&vdev->pdev));
+
+        if (vmsd) {
+            snprintf(name, sizeof(name), "%s.bar%d", vmsd->name, i);
         } else {
             snprintf(name, sizeof(name), "%s.bar%d",
-                     vdev->pdev.qdev.info->name, i);
+                     object_get_typename(OBJECT(&vdev->pdev)), i);
         }
 
         if (space == PCI_BASE_ADDRESS_SPACE_MEMORY) {
@@ -1167,6 +1164,7 @@ static void vfio_unregister_netlink(VFIODevice *vdev)
 static int vfio_load_rom(VFIODevice *vdev)
 {
     uint64_t size = vdev->rom_size;
+    const VMStateDescription *vmsd;
     char name[32];
     off_t off = 0, voff = vdev->rom_offset;
     ssize_t bytes;
@@ -1179,8 +1177,15 @@ static int vfio_load_rom(VFIODevice *vdev)
     DPRINTF("%s(%04x:%02x:%02x.%x)\n", __FUNCTION__,
             vdev->host.seg, vdev->host.bus, vdev->host.dev, vdev->host.func);
 
-    snprintf(name, sizeof(name), "%s.rom", vdev->pdev.qdev.info->name);
-    memory_region_init_ram(&vdev->pdev.rom, &vdev->pdev.qdev, name, size);
+    vmsd = qdev_get_vmsd(DEVICE(&vdev->pdev));
+
+    if (vmsd) {
+        snprintf(name, sizeof(name), "%s.rom", vmsd->name);
+    } else {
+        snprintf(name, sizeof(name), "%s.rom",
+                 object_get_typename(OBJECT(&vdev->pdev)));
+    }
+    memory_region_init_ram(&vdev->pdev.rom, name, size);
     ptr = memory_region_get_ram_ptr(&vdev->pdev.rom);
     memset(ptr, 0xff, size);
 
@@ -1267,16 +1272,30 @@ static int vfio_connect_container(VFIOGroup *group, bool prefer_shared)
 
     container = g_malloc0(sizeof(*container));
     container->fd = fd;
-    container->client.set_memory = vfio_client_set_memory;
-    container->client.sync_dirty_bitmap = vfio_client_sync_dirty_bitmap;
-    container->client.migration_log = vfio_client_migration_log;
     QLIST_INIT(&container->group_list);
     QLIST_INSERT_HEAD(&container_list, container, next);
 
     group->container = container;
     QLIST_INSERT_HEAD(&container->group_list, group, container_next);
 
-    cpu_register_phys_memory_client(&container->client);
+#ifndef TARGET_PPC64
+    container->listener = (MemoryListener) {
+        .begin = vfio_listener_dummy1,
+        .commit = vfio_listener_dummy1,
+        .region_add = vfio_listener_region_add,
+        .region_del = vfio_listener_region_del,
+        .region_nop = vfio_listener_dummy2,
+        .log_start = vfio_listener_dummy2,
+        .log_stop = vfio_listener_dummy2,
+        .log_sync = vfio_listener_dummy2,
+        .log_global_start = vfio_listener_dummy1,
+        .log_global_stop = vfio_listener_dummy1,
+        .eventfd_add = vfio_listener_dummy3,
+        .eventfd_del =vfio_listener_dummy3,
+    };
+
+    memory_listener_register(&container->listener, get_system_memory());
+#endif
 
     return 0;
 }
@@ -1294,7 +1313,9 @@ static void vfio_disconnect_container(VFIOGroup *group)
     group->container = NULL;
 
     if (QLIST_EMPTY(&container->group_list)) {
-        cpu_unregister_phys_memory_client(&container->client);
+#ifndef TARGET_PPC64
+        memory_listener_unregister(&container->listener);
+#endif
         QLIST_REMOVE(container, next);
         DPRINTF("vfio_disconnect_container: close container->fd\n");
         close(container->fd);
@@ -1514,6 +1535,9 @@ static int vfio_initfn(struct PCIDevice *pdev)
     int groupid;
     int ret;
 
+    sprintf(pdev->name, "vfio-%04x:%02x:%02x.%01x",
+            vdev->host.seg, vdev->host.bus, vdev->host.dev, vdev->host.func);
+
     /* Check that the host device exists */
     sprintf(path, "/sys/bus/pci/devices/%04x:%02x:%02x.%01x/",
             vdev->host.seg, vdev->host.bus, vdev->host.dev, vdev->host.func);
@@ -1651,34 +1675,41 @@ static void vfio_reset(DeviceState *dev)
 
 static PropertyInfo qdev_prop_hostaddr = {
     .name  = "pci-hostaddr",
-    .type  = -1,
-    .size  = sizeof(PCIHostDevice),
     .parse = parse_hostaddr,
     .print = print_hostaddr,
 };
 
-static PCIDeviceInfo vfio_info = {
-    .qdev.name    = "vfio-pci",
-    .qdev.desc    = "pass through host pci devices to the guest via vfio",
-    .qdev.size    = sizeof(VFIODevice),
-    .qdev.reset   = vfio_reset,
-    .init         = vfio_initfn,
-    .exit         = vfio_exitfn,
-    .config_read  = vfio_pci_read_config,
-    .config_write = vfio_pci_write_config,
-    .qdev.props   = (Property[]) {
-        DEFINE_PROP("host", VFIODevice, host,
-                    qdev_prop_hostaddr, PCIHostDevice),
-        //TODO - support passed fds
-        //DEFINE_PROP_STRING("vfiofd", VFIODevice, vfiofd_name),
-        //DEFINE_PROP_STRING("vfiogroupfd, VFIODevice, vfiogroupfd_name),
-        DEFINE_PROP_END_OF_LIST(),
-    },
+static Property vfio_pci_dev_properties[] = {
+    DEFINE_PROP("host", VFIODevice, host, qdev_prop_hostaddr, PCIHostDevice),
+    //TODO - support passed fds
+    //DEFINE_PROP_STRING("vfiofd", VFIODevice, vfiofd_name),
+    //DEFINE_PROP_STRING("vfiogroupfd, VFIODevice, vfiogroupfd_name),
+    DEFINE_PROP_END_OF_LIST(),
 };
 
-static void vfio_register_devices(void)
+
+static void vfio_pci_dev_class_init(ObjectClass *klass, void *data)
 {
-    pci_qdev_register(&vfio_info);
+    PCIDeviceClass *dc = PCI_DEVICE_CLASS(klass);
+
+    dc->parent_class.reset = vfio_reset;
+    dc->init = vfio_initfn;
+    dc->exit = vfio_exitfn;
+    dc->config_read = vfio_pci_read_config;
+    dc->config_write = vfio_pci_write_config;
+    dc->parent_class.props = vfio_pci_dev_properties;
 }
 
-device_init(vfio_register_devices)
+static TypeInfo vfio_pci_dev_info = {
+    .name          = "vfio-pci",
+    .parent        = TYPE_PCI_DEVICE,
+    .instance_size = sizeof(VFIODevice),
+    .class_init    = vfio_pci_dev_class_init,
+};
+
+static void register_vfio_pci_dev_type(void)
+{
+    type_register_static(&vfio_pci_dev_info);
+}
+
+type_init(register_vfio_pci_dev_type)

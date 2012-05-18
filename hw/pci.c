@@ -355,9 +355,9 @@ void pci_add_irq_update_notifier(PCIDevice *d, Notifier *notify)
     notifier_list_add(&d->bus->irq_update_notifiers, notify);
 }
 
-void pci_remove_irq_update_notifier(PCIDevice *d, Notifier *notify)
+void pci_remove_irq_update_notifier(Notifier *notify)
 {
-    notifier_list_remove(&d->bus->irq_update_notifiers, notify);
+    notifier_remove(notify);
 }
 
 void pci_bus_update_irqs(PCIBus *b)

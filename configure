@@ -2065,7 +2065,8 @@ EOF
       feature_not_found "vfio-pci"
     fi
     vfio_pci=no
-  fi  
+  fi
+fi
 
 ##########################################
 # libcap probe

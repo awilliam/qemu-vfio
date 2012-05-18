@@ -162,7 +162,7 @@ static void ioapic_update_gsi_eoi_notifier(Notifier *notify, uint32_t gsi,
         if (add) {
             notifier_list_add(&s->eoi_notifiers[pin], notify);
         } else {
-            notifier_list_remove(&s->eoi_notifiers[pin], notify);
+            notifier_remove(notify);
         }
         return;
     }

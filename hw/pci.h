@@ -297,7 +297,7 @@ void pci_bus_irqs(PCIBus *bus, pci_set_irq_fn set_irq, pci_get_irq_fn get_irq,
                   void *irq_opaque, int nirq);
 int pci_bus_get_irq_level(PCIBus *bus, int irq_num);
 void pci_add_irq_update_notifier(PCIDevice *d, Notifier *notify);
-void pci_remove_irq_update_notifier(PCIDevice *d, Notifier *notify);
+void pci_remove_irq_update_notifier(Notifier *notify);
 void pci_bus_update_irqs(PCIBus *bus);
 void pci_bus_hotplug(PCIBus *bus, pci_hotplug_fn hotplug, DeviceState *dev);
 PCIBus *pci_register_bus(DeviceState *parent, const char *name,

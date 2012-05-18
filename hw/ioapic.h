@@ -20,6 +20,7 @@
 #ifndef HW_IOAPIC_H
 #define HW_IOAPIC_H
 
+#include <stdint.h>
 #include "notify.h"
 
 #define IOAPIC_NUM_PINS 24
