@@ -12,11 +12,14 @@
 #define VFIO_H
 
 #include <linux/types.h>
-#include <asm/ioctl.h>
+#include <linux/ioctl.h>
 
 #define VFIO_API_VERSION	0
 
 #ifdef __KERNEL__	/* Internal VFIO-core/bus driver API */
+
+#include <linux/iommu.h>
+#include <linux/mm.h>
 
 /**
  * struct vfio_device_ops - VFIO bus driver device callbacks
@@ -55,7 +58,7 @@ struct vfio_iommu_driver_ops {
 	char		*name;
 	struct module	*owner;
 	void		*(*open)(unsigned long arg);
-	void		(*release)(void *iommu_data); 
+	void		(*release)(void *iommu_data);
 	ssize_t		(*read)(void *iommu_data, char __user *buf,
 				size_t count, loff_t *ppos);
 	ssize_t		(*write)(void *iommu_data, const char __user *buf,
@@ -72,7 +75,8 @@ struct vfio_iommu_driver_ops {
 
 extern int vfio_register_iommu_driver(const struct vfio_iommu_driver_ops *ops);
 
-extern void vfio_unregister_iommu_driver(const struct vfio_iommu_driver_ops *ops);
+extern void vfio_unregister_iommu_driver(
+				const struct vfio_iommu_driver_ops *ops);
 
 /**
  * offsetofend(TYPE, MEMBER)
@@ -94,7 +98,7 @@ extern void vfio_unregister_iommu_driver(const struct vfio_iommu_driver_ops *ops
 
 /* Extensions */
 
-#define VFIO_X86_IOMMU		1
+#define VFIO_TYPE1_IOMMU		1
 
 /*
  * The IOCTL interface is designed for extensibility by embedding the
@@ -149,7 +153,7 @@ extern void vfio_unregister_iommu_driver(const struct vfio_iommu_driver_ops *ops
 
 /**
  * VFIO_GROUP_GET_STATUS - _IOR(VFIO_TYPE, VFIO_BASE + 3,
- * 						struct vfio_group_status)
+ *						struct vfio_group_status)
  *
  * Retrieve information about the group.  Fills in provided
  * struct vfio_group_info.  Caller sets argsz.
@@ -209,7 +213,7 @@ struct vfio_group_status {
 
 /**
  * VFIO_DEVICE_GET_INFO - _IOR(VFIO_TYPE, VFIO_BASE + 7,
- * 						struct vfio_device_info)
+ *						struct vfio_device_info)
  *
  * Retrieve information about the device.  Fills in provided
  * struct vfio_device_info.  Caller sets argsz.
@@ -386,7 +390,7 @@ enum {
 	VFIO_PCI_NUM_IRQS
 };
 
-/* -------- API for x86 VFIO IOMMU -------- */
+/* -------- API for Type1 VFIO IOMMU -------- */
 
 /**
  * VFIO_IOMMU_GET_INFO - _IOR(VFIO_TYPE, VFIO_BASE + 12, struct vfio_iommu_info)
@@ -396,7 +400,7 @@ enum {
  *
  * XXX Should we do these by CHECK_EXTENSION too?
  */
-struct vfio_iommu_x86_info {
+struct vfio_iommu_type1_info {
 	__u32	argsz;
 	__u32	flags;
 #define VFIO_IOMMU_INFO_PGSIZES (1 << 0)	/* supported page sizes info */
@@ -411,14 +415,14 @@ struct vfio_iommu_x86_info {
  * Map process virtual addresses to IO virtual addresses using the
  * provided struct vfio_dma_map. Caller sets argsz. READ &/ WRITE required.
  */
-struct vfio_iommu_x86_dma_map {
+struct vfio_iommu_type1_dma_map {
 	__u32	argsz;
-	__u32 	flags;
+	__u32	flags;
 #define VFIO_DMA_MAP_FLAG_READ (1 << 0)		/* readable from device */
 #define VFIO_DMA_MAP_FLAG_WRITE (1 << 1)	/* writable from device */
-	__u64	 vaddr;				/* Process virtual address */
-	__u64	 iova;				/* IO virtual address */
-	__u64	 size;				/* Size of mapping (bytes) */
+	__u64	vaddr;				/* Process virtual address */
+	__u64	iova;				/* IO virtual address */
+	__u64	size;				/* Size of mapping (bytes) */
 };
 
 #define VFIO_IOMMU_MAP_DMA _IO(VFIO_TYPE, VFIO_BASE + 13)
@@ -429,7 +433,7 @@ struct vfio_iommu_x86_dma_map {
  * Unmap IO virtual addresses using the provided struct vfio_dma_unmap.
  * Caller sets argsz.
  */
-struct vfio_iommu_x86_dma_unmap {
+struct vfio_iommu_type1_dma_unmap {
 	__u32	argsz;
 	__u32	flags;
 	__u64	iova;				/* IO virtual address */

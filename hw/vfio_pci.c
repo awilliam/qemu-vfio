@@ -640,7 +640,7 @@ static int vfio_dma_map(VFIOContainer *container,
                         target_phys_addr_t iova,
                         ram_addr_t size, void* vaddr)
 {
-    struct vfio_iommu_x86_dma_map map =
+    struct vfio_iommu_type1_dma_map map =
         {
             .argsz = sizeof(map),
             .flags = VFIO_DMA_MAP_FLAG_READ | VFIO_DMA_MAP_FLAG_WRITE,
@@ -660,7 +660,7 @@ static int vfio_dma_map(VFIOContainer *container,
 static int vfio_dma_unmap(VFIOContainer *container,
                           target_phys_addr_t iova, ram_addr_t size)
 {
-    struct vfio_iommu_x86_dma_unmap unmap =
+    struct vfio_iommu_type1_dma_unmap unmap =
         {
             .argsz = sizeof(unmap),
             .flags = 0,
@@ -1278,7 +1278,7 @@ static int vfio_connect_container(VFIOGroup *group, bool prefer_shared)
     container = g_malloc0(sizeof(*container));
     container->fd = fd;
 
-    if (ioctl(fd, VFIO_CHECK_EXTENSION, VFIO_X86_IOMMU)) {
+    if (ioctl(fd, VFIO_CHECK_EXTENSION, VFIO_TYPE1_IOMMU)) {
         ret = ioctl(group->fd, VFIO_GROUP_SET_CONTAINER, &fd);
         if (ret) {
             error_report("vfio: failed to set group container: %s\n",
@@ -1288,7 +1288,7 @@ static int vfio_connect_container(VFIOGroup *group, bool prefer_shared)
             return -1;
         }
 
-        ret = ioctl(fd, VFIO_SET_IOMMU, VFIO_X86_IOMMU);
+        ret = ioctl(fd, VFIO_SET_IOMMU, VFIO_TYPE1_IOMMU);
         if (ret) {
             error_report("vfio: failed to set iommu for container: %s\n",
                          strerror(errno));
