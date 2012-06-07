@@ -21,10 +21,6 @@
 #include <dirent.h>
 #include <stdio.h>
 #include <unistd.h>
-#include <netlink/genl/ctrl.h>
-#include <netlink/genl/genl.h>
-#include <netlink/msg.h>
-#include <netlink/netlink.h>
 #include <sys/io.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -1028,164 +1024,6 @@ static void vfio_unmap_resources(VFIODevice *vdev)
     }
 }
 
-#if 0
-/*
- * Netlink
- */
-static QLIST_HEAD(, VFIODevice) nl_list = QLIST_HEAD_INITIALIZER(nl_list);
-static struct nl_handle *vfio_nl_handle;
-static int vfio_nl_family;
-
-static void vfio_netlink_event(void *opaque)
-{
-    nl_recvmsgs_default(vfio_nl_handle);
-}
-
-static void vfio_remove_abort(void *opaque)
-{
-    VFIODevice *vdev = opaque;
-
-    error_report("ERROR: Host requested removal of VFIO device "
-                 "%04x:%02x:%02x.%x, guest did not respond.  Abort.\n",
-                 vdev->host.seg, vdev->host.bus,
-                 vdev->host.dev, vdev->host.func);
-    abort();
-}
-
-static int vfio_parse_netlink(struct nl_msg *msg, void *arg)
-{
-    struct nlmsghdr *nlh = nlmsg_hdr(msg);
-    struct sockaddr_nl *sockaddr = nlmsg_get_src(msg);
-    struct genlmsghdr *genl;
-    struct nlattr *attrs[VFIO_NL_ATTR_MAX + 1];
-    VFIODevice *vdev = NULL;
-    int cmd;
-    u16 seg;
-    u8 bus, dev, func;
-
-    /* Filter out any messages not from the kernel */
-    if (sockaddr->nl_pid != 0) {
-        return 0;
-    }
-
-    genl = nlmsg_data(nlh);
-    cmd = genl->cmd;        
-
-    genlmsg_parse(nlh, 0, attrs, VFIO_NL_ATTR_MAX, NULL);
-
-    if (!attrs[VFIO_ATTR_PCI_DOMAIN] || !attrs[VFIO_ATTR_PCI_BUS] ||
-        !attrs[VFIO_ATTR_PCI_SLOT] || !attrs[VFIO_ATTR_PCI_FUNC]) {
-        fprintf(stderr, "vfio: Invalid netlink message, no device info\n");
-        return -1;
-    }
-
-    seg = nla_get_u16(attrs[VFIO_ATTR_PCI_DOMAIN]);
-    bus = nla_get_u8(attrs[VFIO_ATTR_PCI_BUS]);
-    dev = nla_get_u8(attrs[VFIO_ATTR_PCI_SLOT]);
-    func = nla_get_u8(attrs[VFIO_ATTR_PCI_FUNC]);
-
-    DPRINTF("Received command %d from netlink for device %04x:%02x:%02x.%x\n",
-            cmd, seg, bus, dev, func);
-
-    QLIST_FOREACH(vdev, &nl_list, nl_next) {
-        if (seg == vdev->host.seg && bus == vdev->host.bus &&
-            dev == vdev->host.dev && func == vdev->host.func) {
-            break;
-        }
-    }
-
-    if (!vdev) {
-        return 0;
-    }
-
-    switch (cmd) {
-    case VFIO_MSG_REMOVE:
-        fprintf(stderr, "vfio: Host requests removal of device "
-                "%04x:%02x:%02x.%x, sending unplug request to guest.\n",
-                seg, bus, dev, func);
-
-        qdev_unplug(&vdev->pdev.qdev);
-
-        /* This isn't an optional request, give the guest some time to release
-         * the device.  If it doesn't, we need to trigger a bigger hammer. */
-        vdev->remove_timer = qemu_new_timer_ms(rt_clock,
-                                               vfio_remove_abort, vdev);
-        qemu_mod_timer(vdev->remove_timer,
-                       qemu_get_clock_ms(rt_clock) + 30000);
-        break;
-    /* TODO: Handle errors & suspend/resume */
-    }
-
-    return 0;
-}
-
-static int vfio_register_netlink(VFIODevice *vdev)
-{
-    struct nl_msg *msg;
-
-    if (QLIST_EMPTY(&nl_list)) {
-        int fd;
-
-        vfio_nl_handle = nl_handle_alloc();
-        if (!vfio_nl_handle) {
-            error_report("vfio: Failed nl_handle_alloc\n");
-            return -1;
-        }
-
-        genl_connect(vfio_nl_handle);
-        vfio_nl_family = genl_ctrl_resolve(vfio_nl_handle, "VFIO");
-        if (vfio_nl_family < 0) {
-            error_report("vfio: Failed to resolve netlink channel\n");
-            nl_handle_destroy(vfio_nl_handle);
-            return -1;
-        }
-        nl_disable_sequence_check(vfio_nl_handle);
-        if (nl_socket_modify_cb(vfio_nl_handle, NL_CB_VALID, NL_CB_CUSTOM,
-                                vfio_parse_netlink, NULL)) {
-            error_report("vfio: Failed to modify netlink callback\n");
-            nl_handle_destroy(vfio_nl_handle);
-            return -1;
-        }
-
-        fd = nl_socket_get_fd(vfio_nl_handle);
-        qemu_set_fd_handler(fd, vfio_netlink_event, NULL, vdev);
-    }
-
-    QLIST_INSERT_HEAD(&nl_list, vdev, nl_next);
-
-    msg = nlmsg_alloc();
-    genlmsg_put(msg, NL_AUTO_PID, NL_AUTO_SEQ, vfio_nl_family, 0,
-                NLM_F_REQUEST, VFIO_MSG_REGISTER, 1);
-    nla_put_u64(msg, VFIO_ATTR_MSGCAP, 1ULL << VFIO_MSG_REMOVE);
-    nla_put_u16(msg, VFIO_ATTR_PCI_DOMAIN, vdev->host.seg);
-    nla_put_u8(msg, VFIO_ATTR_PCI_BUS, vdev->host.bus);
-    nla_put_u8(msg, VFIO_ATTR_PCI_SLOT, vdev->host.dev);
-    nla_put_u8(msg, VFIO_ATTR_PCI_FUNC, vdev->host.func);
-    nl_send_auto_complete(vfio_nl_handle, msg);
-    nlmsg_free(msg);
-
-    return 0;
-}
-
-static void vfio_unregister_netlink(VFIODevice *vdev)
-{
-    if (qemu_timer_pending(vdev->remove_timer)) {
-        qemu_del_timer(vdev->remove_timer);
-        qemu_free_timer(vdev->remove_timer);
-    }
-
-    QLIST_REMOVE(vdev, nl_next);
-
-    if (QLIST_EMPTY(&nl_list)) {
-        int fd;
-
-        fd = nl_socket_get_fd(vfio_nl_handle);
-        qemu_set_fd_handler(fd, NULL, NULL, NULL);
-        nl_handle_destroy(vfio_nl_handle);
-    }
-}
-#endif
-
 /*
  * General setup
  */
@@ -1640,12 +1478,6 @@ static int vfio_initfn(struct PCIDevice *pdev)
 
     vfio_load_rom(vdev);
 
-#if 0
-    if (vfio_register_netlink(vdev)) {
-        goto out_disable_vfiofd;
-    }
-#endif
-
     if (msi_supported && vfio_setup_msi(vdev))
         goto out;
 
@@ -1661,10 +1493,6 @@ out_unmap_resources:
     vfio_unmap_resources(vdev);
 out_disable_msi:
     vfio_teardown_msi(vdev);
-#if 0
-out_disable_netlink:
-    vfio_unregister_netlink(vdev);
-#endif
 out:
     vfio_put_device(vdev);
     vfio_put_group(group);
@@ -1679,9 +1507,6 @@ static int vfio_exitfn(struct PCIDevice *pdev)
     vfio_disable_interrupts(vdev);
     vfio_teardown_msi(vdev);
     vfio_unmap_resources(vdev);
-#if 0
-    vfio_unregister_netlink(vdev);
-#endif
     vfio_put_device(vdev);
     vfio_put_group(group);
     return 0;

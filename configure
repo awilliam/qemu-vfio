@@ -141,8 +141,8 @@ cap_ng=""
 attr=""
 libattr=""
 xfs=""
-vfio_pci=""
 
+vfio_pci="no"
 vhost_net="no"
 kvm="no"
 gprof="no"
@@ -490,6 +490,7 @@ Haiku)
   usb="linux"
   kvm="yes"
   vhost_net="yes"
+  vfio_pci="yes"
   if [ "$cpu" = "i386" -o "$cpu" = "x86_64" ] ; then
     audio_possible_drivers="$audio_possible_drivers fmod"
   fi
@@ -2045,27 +2046,6 @@ then
 else
     echo "glib-$glib_req_ver required to compile QEMU"
     exit 1
-fi
-
-##########################################
-# vfio_pci needs netlink, test for libnl
-
-if test "$vfio_pci" != "no"; then
-  libnl="-lnl"
-  cat > $TMPC << EOF
-#include <netlink/netlink.h>
-int main(void) { nl_handle_alloc(); return 0; }
-EOF
-  if compile_prog "" "$libnl" ; then
-    libs_softmmu="$libnl $libs_softmmu"
-    vfio_pci=yes
-  else
-    if test "$vfio_pci" = "yes"; then
-      echo "NOTE: vfio-pci requires libnl."
-      feature_not_found "vfio-pci"
-    fi
-    vfio_pci=no
-  fi
 fi
 
 ##########################################
