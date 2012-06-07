@@ -6099,7 +6099,7 @@ static void gen_compute_branch1 (CPUMIPSState *env, DisasContext *ctx, uint32_t 
             TCGv_i32 t1 = tcg_temp_new_i32();
             tcg_gen_shri_i32(t0, fpu_fcr31, get_fp_bit(cc));
             tcg_gen_shri_i32(t1, fpu_fcr31, get_fp_bit(cc+1));
-            tcg_gen_nor_i32(t0, t0, t1);
+            tcg_gen_nand_i32(t0, t0, t1);
             tcg_temp_free_i32(t1);
             tcg_gen_andi_i32(t0, t0, 1);
             tcg_gen_extu_i32_tl(bcond, t0);
@@ -6123,11 +6123,11 @@ static void gen_compute_branch1 (CPUMIPSState *env, DisasContext *ctx, uint32_t 
             TCGv_i32 t1 = tcg_temp_new_i32();
             tcg_gen_shri_i32(t0, fpu_fcr31, get_fp_bit(cc));
             tcg_gen_shri_i32(t1, fpu_fcr31, get_fp_bit(cc+1));
-            tcg_gen_or_i32(t0, t0, t1);
+            tcg_gen_and_i32(t0, t0, t1);
             tcg_gen_shri_i32(t1, fpu_fcr31, get_fp_bit(cc+2));
-            tcg_gen_or_i32(t0, t0, t1);
+            tcg_gen_and_i32(t0, t0, t1);
             tcg_gen_shri_i32(t1, fpu_fcr31, get_fp_bit(cc+3));
-            tcg_gen_nor_i32(t0, t0, t1);
+            tcg_gen_nand_i32(t0, t0, t1);
             tcg_temp_free_i32(t1);
             tcg_gen_andi_i32(t0, t0, 1);
             tcg_gen_extu_i32_tl(bcond, t0);
@@ -12689,7 +12689,7 @@ static void mips_tcg_init(void)
 
 #include "translate_init.c"
 
-CPUMIPSState *cpu_mips_init (const char *cpu_model)
+MIPSCPU *cpu_mips_init(const char *cpu_model)
 {
     MIPSCPU *cpu;
     CPUMIPSState *env;
@@ -12709,9 +12709,9 @@ CPUMIPSState *cpu_mips_init (const char *cpu_model)
     fpu_init(env, def);
     mvp_init(env, def);
     mips_tcg_init();
-    cpu_state_reset(env);
+    cpu_reset(CPU(cpu));
     qemu_init_vcpu(env);
-    return env;
+    return cpu;
 }
 
 void cpu_state_reset(CPUMIPSState *env)

@@ -15,6 +15,7 @@
 #ifndef QEMU_VIRTIO_PCI_H
 #define QEMU_VIRTIO_PCI_H
 
+#include "virtio-blk.h"
 #include "virtio-net.h"
 #include "virtio-serial.h"
 #include "virtio-scsi.h"
@@ -25,6 +26,11 @@
 #define VIRTIO_PCI_FLAG_USE_IOEVENTFD   (1 << VIRTIO_PCI_FLAG_USE_IOEVENTFD_BIT)
 
 typedef struct {
+    int virq;
+    unsigned int users;
+} VirtIOIRQFD;
+
+typedef struct {
     PCIDevice pci_dev;
     VirtIODevice *vdev;
     MemoryRegion bar;
@@ -32,8 +38,7 @@ typedef struct {
     uint32_t flags;
     uint32_t class_code;
     uint32_t nvectors;
-    BlockConf block;
-    char *block_serial;
+    VirtIOBlkConf blk;
     NICConf nic;
     uint32_t host_features;
 #ifdef CONFIG_LINUX
@@ -44,6 +49,7 @@ typedef struct {
     VirtIOSCSIConf scsi;
     bool ioeventfd_disabled;
     bool ioeventfd_started;
+    VirtIOIRQFD *vector_irqfd;
 } VirtIOPCIProxy;
 
 void virtio_init_pci(VirtIOPCIProxy *proxy, VirtIODevice *vdev);

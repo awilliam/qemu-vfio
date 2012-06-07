@@ -2839,6 +2839,21 @@ if compile_prog "" "" ; then
     linux_magic_h=yes
 fi
 
+########################################
+# check if environ is declared
+
+has_environ=no
+cat > $TMPC << EOF
+#include <unistd.h>
+int main(void) {
+    environ = environ;
+    return 0;
+}
+EOF
+if compile_prog "" "" ; then
+    has_environ=yes
+fi
+
 ##########################################
 # End of CC checks
 # After here, no more $cc or $ld runs
@@ -3351,6 +3366,10 @@ if test "$linux_magic_h" = "yes" ; then
   echo "CONFIG_LINUX_MAGIC_H=y" >> $config_host_mak
 fi
 
+if test "$has_environ" = "yes" ; then
+  echo "CONFIG_HAS_ENVIRON=y" >> $config_host_mak
+fi
+
 # USB host support
 case "$usb" in
 linux)
@@ -3725,6 +3744,10 @@ case "$target_arch2" in
       fi
     fi
 esac
+case "$target_arch2" in
+  i386|x86_64)
+    echo "CONFIG_HAVE_GET_MEMORY_MAPPING=y" >> $config_target_mak
+esac
 if test "$target_arch2" = "ppc64" -a "$fdt" = "yes"; then
   echo "CONFIG_PSERIES=y" >> $config_target_mak
 fi
@@ -3740,6 +3763,10 @@ if test "$target_softmmu" = "yes" ; then
   if test "$smartcard_nss" = "yes" ; then
     echo "subdir-$target: subdir-libcacard" >> $config_host_mak
   fi
+  case "$target_arch2" in
+    i386|x86_64)
+      echo "CONFIG_HAVE_CORE_DUMP=y" >> $config_target_mak
+  esac
 fi
 if test "$target_user_only" = "yes" ; then
   echo "CONFIG_USER_ONLY=y" >> $config_target_mak
