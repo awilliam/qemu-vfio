@@ -159,14 +159,13 @@ static int print_hostaddr(DeviceState *qdev, Property *prop,
  */
 static inline void vfio_unmask_intx(VFIODevice *vdev)
 {
-    struct vfio_irq_set irq_set =
-        {
-            .argsz = sizeof(irq_set),
-            .flags = VFIO_IRQ_SET_DATA_NONE | VFIO_IRQ_SET_ACTION_UNMASK,
-            .index = VFIO_PCI_INTX_IRQ_INDEX,
-            .start = 0,
-            .count = 1,
-        };
+    struct vfio_irq_set irq_set = {
+        .argsz = sizeof(irq_set),
+        .flags = VFIO_IRQ_SET_DATA_NONE | VFIO_IRQ_SET_ACTION_UNMASK,
+        .index = VFIO_PCI_INTX_IRQ_INDEX,
+        .start = 0,
+        .count = 1,
+    };
 
     ioctl(vdev->fd, VFIO_DEVICE_SET_IRQS, &irq_set);
 }
@@ -247,7 +246,6 @@ static int vfio_enable_intx(VFIODevice *vdev)
             .count = 1,
         },
     };
-    int32_t *fd = (int32_t *)&irq_set_fd.irq_set.data;
     uint8_t pin = vfio_pci_read_config(&vdev->pdev, PCI_INTERRUPT_PIN, 1);
 
     if (!pin) {
@@ -269,11 +267,11 @@ static int vfio_enable_intx(VFIODevice *vdev)
         return -1;
     }
 
-    *fd = event_notifier_get_fd(&vdev->intx.interrupt);
-    qemu_set_fd_handler(*fd, vfio_intx_interrupt, NULL, vdev);
+    irq_set_fd.fd = event_notifier_get_fd(&vdev->intx.interrupt);
+    qemu_set_fd_handler(irq_set_fd.fd, vfio_intx_interrupt, NULL, vdev);
 
     if (ioctl(vdev->fd, VFIO_DEVICE_SET_IRQS, &irq_set_fd)) {
-        error_report("vfio: Error: Failed to setup INTx fd %s\n",
+        error_report("vfio: Error: Failed to setup INTx fd: %s\n",
                      strerror(errno));
         return -1;
     }
@@ -289,14 +287,13 @@ static int vfio_enable_intx(VFIODevice *vdev)
 static void vfio_disable_intx(VFIODevice *vdev)
 {
     int fd;
-    struct vfio_irq_set irq_set =
-        {
-            .argsz = sizeof(irq_set),
-            .flags = VFIO_IRQ_SET_DATA_NONE | VFIO_IRQ_SET_ACTION_TRIGGER,
-            .index = VFIO_PCI_INTX_IRQ_INDEX,
-            .start = 0,
-            .count = 0,
-        };
+    struct vfio_irq_set irq_set = {
+        .argsz = sizeof(irq_set),
+        .flags = VFIO_IRQ_SET_DATA_NONE | VFIO_IRQ_SET_ACTION_TRIGGER,
+        .index = VFIO_PCI_INTX_IRQ_INDEX,
+        .start = 0,
+        .count = 0,
+    };
 
     ioctl(vdev->fd, VFIO_DEVICE_SET_IRQS, &irq_set);
 
@@ -345,12 +342,15 @@ static void vfio_enable_msi(VFIODevice *vdev, bool msix)
 
     vfio_disable_interrupts(vdev);
 
+    /* TODO: MSI-X - look in the vector table to see what to enable */
+    /*             - watch vector table for (un)masks */
     vdev->nr_vectors = msix ? vdev->pdev.msix_entries_nr :
                               msi_nr_vectors_allocated(&vdev->pdev);
 retry:
     vdev->msi_vectors = g_malloc(vdev->nr_vectors * sizeof(MSIVector));
 
     argsz = sizeof(*irq_set) + (vdev->nr_vectors * sizeof(*fds));
+
     irq_set = g_malloc(argsz);
     irq_set->argsz = argsz;
     irq_set->flags = VFIO_IRQ_SET_DATA_EVENTFD | VFIO_IRQ_SET_ACTION_TRIGGER;
@@ -383,12 +383,14 @@ retry:
     ret = ioctl(vdev->fd, VFIO_DEVICE_SET_IRQS, irq_set);
     if (ret) {
         if (ret < 0) {
-            error_report("vfio: Error: Failed to setup MSI/X fds %s\n",
+            error_report("vfio: Error: Failed to setup MSI/X fds: %s\n",
                          strerror(errno));
         } else if (ret != vdev->nr_vectors) {
-            DPRINTF("%s(): Unable to allocate %d MSI vectors, retry with %d\n",
-                    __FUNCTION__, irq_set->count, ret);
+            error_report("vfio: Error: Failed to enable %d MSI%s "
+                         "vectors, retry with %d\n", irq_set->count,
+                         msix ? "x" : "", ret);
         }
+
         for (i = 0; i < vdev->nr_vectors; i++) {
             if (msix) {
                 msix_vector_unuse(&vdev->pdev, i);
@@ -396,8 +398,10 @@ retry:
             qemu_set_fd_handler(fds[i], NULL, NULL, NULL);
             event_notifier_cleanup(&vdev->msi_vectors[i].interrupt);
         }
+
         g_free(irq_set);
         g_free(vdev->msi_vectors);
+
         if (ret > 0 && ret != vdev->nr_vectors) {
             vdev->nr_vectors = ret;
             goto retry;
@@ -418,14 +422,13 @@ retry:
 
 static void vfio_disable_msi(VFIODevice *vdev, bool msix)
 {
-    struct vfio_irq_set irq_set =
-        {
-            .argsz = sizeof(irq_set),
-            .flags = VFIO_IRQ_SET_DATA_NONE | VFIO_IRQ_SET_ACTION_TRIGGER,
-            .index = msix ? VFIO_PCI_MSIX_IRQ_INDEX : VFIO_PCI_MSI_IRQ_INDEX,
-            .start = 0,
-            .count = 0,
-        };
+    struct vfio_irq_set irq_set = {
+        .argsz = sizeof(irq_set),
+        .flags = VFIO_IRQ_SET_DATA_NONE | VFIO_IRQ_SET_ACTION_TRIGGER,
+        .index = msix ? VFIO_PCI_MSIX_IRQ_INDEX : VFIO_PCI_MSI_IRQ_INDEX,
+        .start = 0,
+        .count = 0,
+    };
     int i;
 
     ioctl(vdev->fd, VFIO_DEVICE_SET_IRQS, &irq_set);
@@ -566,6 +569,7 @@ static uint32_t vfio_pci_read_config(PCIDevice *pdev, uint32_t addr, int len)
     DPRINTF("%s(%04x:%02x:%02x.%x, @0x%x, len=0x%x) %x\n", __FUNCTION__,
             vdev->host.seg, vdev->host.bus, vdev->host.dev,
             vdev->host.func, addr, len, val);
+
     return val;
 }
 
@@ -634,14 +638,13 @@ static int vfio_dma_map(VFIOContainer *container,
                         target_phys_addr_t iova,
                         ram_addr_t size, void* vaddr)
 {
-    struct vfio_iommu_type1_dma_map map =
-        {
-            .argsz = sizeof(map),
-            .flags = VFIO_DMA_MAP_FLAG_READ | VFIO_DMA_MAP_FLAG_WRITE,
-            .vaddr = (__u64)vaddr,
-            .iova = iova,
-            .size = size,
-        };
+    struct vfio_iommu_type1_dma_map map = {
+        .argsz = sizeof(map),
+        .flags = VFIO_DMA_MAP_FLAG_READ | VFIO_DMA_MAP_FLAG_WRITE,
+        .vaddr = (__u64)vaddr,
+        .iova = iova,
+        .size = size,
+    };
 
     if (ioctl(container->fd, VFIO_IOMMU_MAP_DMA, &map)) {
         DPRINTF("VFIO_MAP_DMA: %d\n", errno);
@@ -654,13 +657,12 @@ static int vfio_dma_map(VFIOContainer *container,
 static int vfio_dma_unmap(VFIOContainer *container,
                           target_phys_addr_t iova, ram_addr_t size)
 {
-    struct vfio_iommu_type1_dma_unmap unmap =
-        {
-            .argsz = sizeof(unmap),
-            .flags = 0,
-            .iova = iova,
-            .size = size,
-        };
+    struct vfio_iommu_type1_dma_unmap unmap = {
+        .argsz = sizeof(unmap),
+        .flags = 0,
+        .iova = iova,
+        .size = size,
+    };
 
     if (ioctl(container->fd, VFIO_IOMMU_UNMAP_DMA, &unmap)) {
         DPRINTF("VFIO_UNMAP_DMA: %d\n", errno);
@@ -994,7 +996,6 @@ static int vfio_map_resources(VFIODevice *vdev)
 
             res->valid = true;
         } else if (space == PCI_BASE_ADDRESS_SPACE_IO) {
-
             memory_region_init_io(&res->region, &vfio_resource_ops, res,
                                   name, res->size);
 
@@ -1077,7 +1078,7 @@ static int vfio_load_rom(VFIODevice *vdev)
     return 0;
 }
 
-static int vfio_connect_container(VFIOGroup *group, bool prefer_shared)
+static int vfio_connect_container(VFIOGroup *group)
 {
     VFIOContainer *container;
     int ret, fd;
@@ -1086,14 +1087,11 @@ static int vfio_connect_container(VFIOGroup *group, bool prefer_shared)
         return 0;
     }
 
-    if (prefer_shared) {
-        QLIST_FOREACH(container, &container_list, next) {
-            if (!ioctl(group->fd, VFIO_GROUP_SET_CONTAINER, &container->fd)) {
-                group->container = container;
-                QLIST_INSERT_HEAD(&container->group_list, group,
-                                  container_next);
-                return 0;
-            }
+    QLIST_FOREACH(container, &container_list, next) {
+        if (!ioctl(group->fd, VFIO_GROUP_SET_CONTAINER, &container->fd)) {
+            group->container = container;
+            QLIST_INSERT_HEAD(&container->group_list, group, container_next);
+            return 0;
         }
     }
 
@@ -1146,7 +1144,7 @@ static int vfio_connect_container(VFIOGroup *group, bool prefer_shared)
             .log_global_start = vfio_listener_dummy1,
             .log_global_stop = vfio_listener_dummy1,
             .eventfd_add = vfio_listener_dummy3,
-            .eventfd_del =vfio_listener_dummy3,
+            .eventfd_del = vfio_listener_dummy3,
         };
 
         memory_listener_register(&container->listener, get_system_memory());
@@ -1232,7 +1230,7 @@ static VFIOGroup *vfio_get_group(int groupid)
     group->groupid = groupid;
     QLIST_INIT(&group->device_list);
 
-    if (vfio_connect_container(group, true)) {
+    if (vfio_connect_container(group)) {
         error_report("vfio: failed to setup container for group %d\n", groupid);
         close(group->fd);
         g_free(group);
@@ -1267,7 +1265,7 @@ static int __vfio_get_device(VFIOGroup *group,
         error_report("vfio: error getting device %s from group %d: %s",
                      name, group->groupid, strerror(errno));
         error_report("Verify all devices in group %d "
-                     "are bound to the vfio driver and not already in use",
+                     "are bound to vfio-pci or pci-stub and not already in use",
                      group->groupid);
         return -1;
     }
@@ -1345,8 +1343,7 @@ static int vfio_get_device(VFIOGroup *group, const char *name, VFIODevice *vdev)
 
     ret = ioctl(vdev->fd, VFIO_DEVICE_GET_REGION_INFO, &reg_info);
     if (ret) {
-        error_report("vfio: Error getting ROM info: %s",
-                     strerror(errno));
+        error_report("vfio: Error getting ROM info: %s", strerror(errno));
         goto error;
     }
 
@@ -1362,8 +1359,7 @@ static int vfio_get_device(VFIOGroup *group, const char *name, VFIODevice *vdev)
 
     ret = ioctl(vdev->fd, VFIO_DEVICE_GET_REGION_INFO, &reg_info);
     if (ret) {
-        error_report("vfio: Error getting config info: %s",
-                     strerror(errno));
+        error_report("vfio: Error getting config info: %s", strerror(errno));
         goto error;
     }
 
@@ -1469,9 +1465,11 @@ static int vfio_initfn(struct PCIDevice *pdev)
         goto out;
     }
 
-    /* Clear host resource mapping info.  If we choose not to register a
+    /*
+     * Clear host resource mapping info.  If we choose not to register a
      * BAR, such as might be the case with the option ROM, we can get
-     * confusing, unwritable, residual addresses from the host here. */
+     * confusing, unwritable, residual addresses from the host here.
+     */
     memset(&vdev->pdev.config[PCI_BASE_ADDRESS_0], 0, 24);
     memset(&vdev->pdev.config[PCI_ROM_ADDRESS], 0, 4);
 
@@ -1536,7 +1534,7 @@ static PropertyInfo qdev_prop_hostaddr = {
 
 static Property vfio_pci_dev_properties[] = {
     DEFINE_PROP("host", VFIODevice, host, qdev_prop_hostaddr, PCIHostDevice),
-    //TODO - support passed fds
+    //TODO - support passed fds... is this necessary?
     //DEFINE_PROP_STRING("vfiofd", VFIODevice, vfiofd_name),
     //DEFINE_PROP_STRING("vfiogroupfd, VFIODevice, vfiogroupfd_name),
     DEFINE_PROP_END_OF_LIST(),
