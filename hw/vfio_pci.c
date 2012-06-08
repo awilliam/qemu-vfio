@@ -42,9 +42,6 @@
 #include "qemu-timer.h"
 #include "range.h"
 #include "vfio_pci.h"
-#include <pci/header.h>
-#include <pci/types.h>
-#include <linux/types.h>
 #include "linux-vfio.h"
 
 //#define DEBUG_VFIO
@@ -812,13 +809,14 @@ static int vfio_setup_msi(VFIODevice *vdev)
         table = le32_to_cpu(table);
 
         vdev->msix = g_malloc0(sizeof(*(vdev->msix)));
-        vdev->msix->bar = table & PCI_MSIX_BIR;
+        vdev->msix->bar = table & PCI_MSIX_FLAGS_BIRMASK;
         vdev->msix->offset = table & ~(MSIX_PAGE_SIZE - 1);
-        vdev->msix->entries = (ctrl & PCI_MSIX_TABSIZE) + 1;
+        vdev->msix->entries = (ctrl & PCI_MSIX_FLAGS_QSIZE) + 1;
 
         DPRINTF("%04x:%02x:%02x.%x PCI MSI-X CAP @0x%x, BAR %d, offset 0x%x\n",
                 vdev->host.seg, vdev->host.bus, vdev->host.dev,
-                vdev->host.func, pos, vdev->msix->bar, table & ~PCI_MSIX_BIR);
+                vdev->host.func, pos, vdev->msix->bar,
+                table & ~PCI_MSIX_FLAGS_BIRMASK);
     }
     return 0;
 }
