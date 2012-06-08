@@ -1096,7 +1096,7 @@ static int vfio_connect_container(VFIOGroup *group, bool prefer_shared)
         }
     }
 
-    fd = open("/dev/vfio/vfio", O_RDWR);
+    fd = qemu_open("/dev/vfio/vfio", O_RDWR);
     if (fd < 0) {
         error_report("vfio: failed to open /dev/vfio/vfio: %s\n",
                      strerror(errno));
@@ -1204,7 +1204,7 @@ static VFIOGroup *vfio_get_group(int groupid)
     group = g_malloc0(sizeof(*group));
 
     sprintf(path, "/dev/vfio/%d", groupid);
-    group->fd = open(path, O_RDWR);
+    group->fd = qemu_open(path, O_RDWR);
     if (group->fd < 0) {
         error_report("vfio: error opening %s: %s", path, strerror(errno));
         g_free(group);
