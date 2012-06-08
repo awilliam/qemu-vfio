@@ -231,24 +231,28 @@ static void vfio_update_irq(Notifier *notify, void *data)
     vfio_eoi(&vdev->intx.eoi, NULL);
 }
 
+struct vfio_irq_set_fd {
+    struct vfio_irq_set irq_set;
+    int32_t fd;
+} QEMU_PACKED;
+
 static int vfio_enable_intx(VFIODevice *vdev)
 {
-    struct vfio_irq_set *irq_set;
-    int32_t *fd;
-    int argsz = sizeof(*irq_set) + sizeof(*fd);
+    struct vfio_irq_set_fd irq_set_fd = {
+	.irq_set = {
+            .argsz = sizeof(irq_set_fd),
+            .flags = VFIO_IRQ_SET_DATA_EVENTFD | VFIO_IRQ_SET_ACTION_TRIGGER,
+            .index = VFIO_PCI_INTX_IRQ_INDEX,
+            .start = 0,
+            .count = 1,
+        },
+    };
+    int32_t *fd = (int32_t *)&irq_set_fd.irq_set.data;
     uint8_t pin = vfio_pci_read_config(&vdev->pdev, PCI_INTERRUPT_PIN, 1);
 
     if (!pin) {
         return 0;
     }
-
-    irq_set = g_malloc(argsz);
-    irq_set->argsz = argsz;
-    irq_set->flags = VFIO_IRQ_SET_DATA_EVENTFD | VFIO_IRQ_SET_ACTION_TRIGGER;
-    irq_set->index = VFIO_PCI_INTX_IRQ_INDEX;
-    irq_set->start = 0;
-    irq_set->count = 1;
-    fd = (int32_t *)&irq_set->data;
 
     vfio_disable_interrupts(vdev);
 
@@ -262,17 +266,15 @@ static int vfio_enable_intx(VFIODevice *vdev)
 
     if (event_notifier_init(&vdev->intx.interrupt, 0)) {
         error_report("vfio: Error: event_notifier_init failed\n");
-        g_free(irq_set);
         return -1;
     }
 
     *fd = event_notifier_get_fd(&vdev->intx.interrupt);
     qemu_set_fd_handler(*fd, vfio_intx_interrupt, NULL, vdev);
 
-    if (ioctl(vdev->fd, VFIO_DEVICE_SET_IRQS, irq_set)) {
+    if (ioctl(vdev->fd, VFIO_DEVICE_SET_IRQS, &irq_set_fd)) {
         error_report("vfio: Error: Failed to setup INTx fd %s\n",
                      strerror(errno));
-        g_free(irq_set);
         return -1;
     }
 
@@ -280,8 +282,6 @@ static int vfio_enable_intx(VFIODevice *vdev)
 
     DPRINTF("%s(%04x:%02x:%02x.%x)\n", __FUNCTION__, vdev->host.seg,
             vdev->host.bus, vdev->host.dev, vdev->host.func);
-
-    g_free(irq_set);
 
     return 0;
 }
