@@ -239,6 +239,7 @@ static void msix_mmio_write(void *opaque, target_phys_addr_t addr,
 static const MemoryRegionOps msix_mmio_ops = {
     .read = msix_mmio_read,
     .write = msix_mmio_write,
+    /* TODO: MSIX should be LITTLE_ENDIAN. */
     .endianness = DEVICE_NATIVE_ENDIAN,
     .valid = {
         .min_access_size = 4,
