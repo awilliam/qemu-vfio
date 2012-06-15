@@ -7,24 +7,22 @@
 #include "ioapic.h"
 #include "event_notifier.h"
 
-typedef struct PCIHostDevice {
+typedef struct VFIOPCIHostDevice {
     uint16_t seg;
     uint8_t bus;
     uint8_t dev:5;
     uint8_t func:3;
-} PCIHostDevice;
+} VFIOPCIHostDevice;
 
-typedef struct PCIResource {
-    off_t offset;
+typedef struct VFIOBAR {
+    off_t fd_offset;
     int fd;
-    MemoryRegion region;
-    bool valid;
-    bool mem;
-    bool slow;
+    MemoryRegion mem;
+    MemoryRegion mmap_mem;
+    void *mmap;
     size_t size;
-    void *virtbase;
-    uint8_t bar;
-} PCIResource;
+    uint8_t nr;
+} VFIOBAR;
 
 typedef struct INTx {
     bool pending;
@@ -65,9 +63,8 @@ typedef struct MSIXInfo {
     uint16_t entries;
     uint32_t table_offset;
     uint32_t pba_offset;
-    MemoryRegion region_lo;
-    MemoryRegion region_hi;
-    void *virtbase;
+    MemoryRegion mmap_mem;
+    void *mmap;
 } MSIXInfo;
 
 typedef struct VFIODevice {
@@ -83,8 +80,8 @@ typedef struct VFIODevice {
     MSIXInfo *msix;
     int nr_vectors;
     int interrupt;
-    PCIResource resources[PCI_NUM_REGIONS - 1]; /* No ROM */
-    PCIHostDevice host;
+    VFIOBAR bars[PCI_NUM_REGIONS - 1]; /* No ROM */
+    VFIOPCIHostDevice host;
     QLIST_ENTRY(VFIODevice) next;
     QEMUTimer *remove_timer;
     uint32_t flags;

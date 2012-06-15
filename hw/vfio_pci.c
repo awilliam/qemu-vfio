@@ -53,9 +53,7 @@
     do { } while (0)
 #endif
 
-/* TODO: msix.h should define these */
 #define MSIX_CAP_LENGTH 12
-#define MSIX_PAGE_SIZE 0x1000
 
 static QLIST_HEAD(, VFIOContainer)
     container_list = QLIST_HEAD_INITIALIZER(container_list);
@@ -101,7 +99,7 @@ static uint8_t vfio_find_cap_offset(PCIDevice *pdev, uint8_t cap)
  */
 static int parse_hostaddr(DeviceState *qdev, Property *prop, const char *str)
 {
-    PCIHostDevice *ptr = qdev_get_prop_ptr(qdev, prop);
+    VFIOPCIHostDevice *ptr = qdev_get_prop_ptr(qdev, prop);
     const char *p = str;
     int n, seg, bus, dev, func;
     char field[5];
@@ -148,7 +146,7 @@ static int parse_hostaddr(DeviceState *qdev, Property *prop, const char *str)
 static int print_hostaddr(DeviceState *qdev, Property *prop,
                           char *dest, size_t len)
 {
-    PCIHostDevice *ptr = qdev_get_prop_ptr(qdev, prop);
+    VFIOPCIHostDevice *ptr = qdev_get_prop_ptr(qdev, prop);
 
     return snprintf(dest, len, "%04x:%02x:%02x.%x",
                     ptr->seg, ptr->bus, ptr->dev, ptr->func);
@@ -457,10 +455,10 @@ static void vfio_disable_msi(VFIODevice *vdev, bool msix)
 /*
  * IO Port/MMIO
  */
-static void vfio_resource_write(void *opaque, target_phys_addr_t addr,
-                                uint64_t data, unsigned size)
+static void vfio_bar_write(void *opaque, target_phys_addr_t addr,
+                           uint64_t data, unsigned size)
 {
-    PCIResource *res = opaque;
+    VFIOBAR *bar = opaque;
     uint8_t tmp[8];
 
     switch (size) {
@@ -477,23 +475,23 @@ static void vfio_resource_write(void *opaque, target_phys_addr_t addr,
         hw_error("vfio: unsupported write size, %d bytes\n", size);
     }
 
-    if (pwrite(res->fd, tmp, size, res->offset + addr) != size) {
+    if (pwrite(bar->fd, tmp, size, bar->fd_offset + addr) != size) {
         error_report("%s(,0x%"PRIx64", 0x%"PRIx64", %d) failed: %s\n",
                      __FUNCTION__, addr, data, size, strerror(errno));
     }
 
     DPRINTF("%s(BAR%d+0x%"PRIx64", 0x%"PRIx64", %d)\n",
-            __FUNCTION__, res->bar, addr, data, size);
+            __FUNCTION__, bar->nr, addr, data, size);
 }
 
-static uint64_t vfio_resource_read(void *opaque,
-                                   target_phys_addr_t addr, unsigned size)
+static uint64_t vfio_bar_read(void *opaque,
+                              target_phys_addr_t addr, unsigned size)
 {
-    PCIResource *res = opaque;
+    VFIOBAR *bar = opaque;
     uint8_t tmp[8];
     uint64_t data = 0;
 
-    if (pread(res->fd, tmp, size, res->offset + addr) != size) {
+    if (pread(bar->fd, tmp, size, bar->fd_offset + addr) != size) {
         error_report("%s(,0x%"PRIx64", %d) failed: %s\n",
                      __FUNCTION__, addr, size, strerror(errno));
         return (uint64_t)-1;
@@ -514,14 +512,14 @@ static uint64_t vfio_resource_read(void *opaque,
     }
 
     DPRINTF("%s(BAR%d+0x%"PRIx64", %d) = 0x%"PRIx64"\n",
-            __FUNCTION__, res->bar, addr, size, data);
+            __FUNCTION__, bar->nr, addr, size, data);
 
     return data;
 }
 
-static const MemoryRegionOps vfio_resource_ops = {
-    .read = vfio_resource_read,
-    .write = vfio_resource_write,
+static const MemoryRegionOps vfio_bar_ops = {
+    .read = vfio_bar_read,
+    .write = vfio_bar_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
@@ -792,8 +790,7 @@ static int vfio_setup_msi(VFIODevice *vdev, int pos)
         error_report("vfio: msi_init failed\n");
         return ret;
     }
-    vdev->msi_cap_size = 0xa + (msi_maskbit ? 0xa : 0) +
-                         (msi_64bit ? 0x4 : 0);
+    vdev->msi_cap_size = 0xa + (msi_maskbit ? 0xa : 0) + (msi_64bit ? 0x4 : 0);
 
     return 0;
 }
@@ -839,10 +836,8 @@ static int vfio_early_setup_msix(VFIODevice *vdev)
     vdev->msix = g_malloc0(sizeof(*(vdev->msix)));
     vdev->msix->table_bar = table & PCI_MSIX_FLAGS_BIRMASK;
     vdev->msix->table_offset = table & ~PCI_MSIX_FLAGS_BIRMASK;
-    vdev->msix->table_offset &= ~(MSIX_PAGE_SIZE - 1);
     vdev->msix->pba_bar = pba & PCI_MSIX_FLAGS_BIRMASK;
     vdev->msix->pba_offset = pba & ~PCI_MSIX_FLAGS_BIRMASK;
-    vdev->msix->pba_offset &= ~(MSIX_PAGE_SIZE - 1);
     vdev->msix->entries = (ctrl & PCI_MSIX_FLAGS_QSIZE) + 1;
 
     DPRINTF("%04x:%02x:%02x.%x "
@@ -862,13 +857,10 @@ static int vfio_setup_msix(VFIODevice *vdev, int pos)
         return 0;
     }
 
-    assert(vdev->msix && vdev->resources[vdev->msix->table_bar].valid &&
-           vdev->resources[vdev->msix->pba_bar].valid);
-
     ret = msix_init(&vdev->pdev, vdev->msix->entries,
-                    &vdev->resources[vdev->msix->table_bar].region,
+                    &vdev->bars[vdev->msix->table_bar].mem,
                     vdev->msix->table_bar, vdev->msix->table_offset,
-                    &vdev->resources[vdev->msix->pba_bar].region,
+                    &vdev->bars[vdev->msix->pba_bar].mem,
                     vdev->msix->pba_bar, vdev->msix->pba_offset, pos);
     if (ret < 0) {
         error_report("vfio: msix_init failed\n");
@@ -881,193 +873,157 @@ static int vfio_setup_msix(VFIODevice *vdev, int pos)
 static void vfio_teardown_msi(VFIODevice *vdev)
 {
     msi_uninit(&vdev->pdev);
-    msix_uninit(&vdev->pdev, &vdev->resources[vdev->msix->table_bar].region,
-                &vdev->resources[vdev->msix->pba_bar].region);
+    msix_uninit(&vdev->pdev, &vdev->bars[vdev->msix->table_bar].mem,
+                &vdev->bars[vdev->msix->pba_bar].mem);
     g_free(vdev->msix);
 }
 
 /*
  * Resource setup
  */
-static void vfio_unmap_region(VFIODevice *vdev, int bar)
+static void vfio_unmap_bar(VFIODevice *vdev, int nr)
 {
-    PCIResource *res = &vdev->resources[bar];
+    VFIOBAR *bar = &vdev->bars[nr];
+    uint64_t size;
 
-    if (res->slow) {
-        memory_region_destroy(&res->region);
-    } else if (vdev->msix && vdev->msix->table_bar == bar) {
-        if (res->virtbase) {
-            memory_region_del_subregion(&res->region, &vdev->msix->region_lo);
-            munmap(res->virtbase, vdev->msix->table_offset);
-            memory_region_destroy(&vdev->msix->region_lo);
-        }
-
-        if (vdev->msix->virtbase) {
-            memory_region_del_subregion(&res->region, &vdev->msix->region_hi);
-            munmap(vdev->msix->virtbase,
-                   res->size - (vdev->msix->table_offset + MSIX_PAGE_SIZE));
-            memory_region_destroy(&vdev->msix->region_hi);
-        }
-
-        memory_region_destroy(&res->region);
-    } else {
-        memory_region_destroy(&res->region);
-        munmap(res->virtbase, res->size);
+    size = memory_region_size(&bar->mmap_mem);
+    if (size) {
+         memory_region_del_subregion(&bar->mem, &bar->mmap_mem);
+         munmap(bar->mmap, size);
     }
+
+    if (vdev->msix && vdev->msix->table_bar == nr) {
+        size = memory_region_size(&vdev->msix->mmap_mem);
+        if (size) {
+            memory_region_del_subregion(&bar->mem, &vdev->msix->mmap_mem);
+            munmap(vdev->msix->mmap, size);
+        }
+    }
+
+    memory_region_destroy(&bar->mem);
 }
 
-static void vfio_map_region(VFIODevice *vdev, int bar, char *name)
+static int vfio_mmap_bar(VFIOBAR *bar, MemoryRegion *mem, MemoryRegion *submem,
+                         void **map, size_t size, off_t offset,
+                         const char *name)
 {
-    PCIResource *res = &vdev->resources[bar];
-
-    if (res->size & 0xfff) {
-        goto slow;
+    *map = mmap(NULL, size, PROT_READ | PROT_WRITE,
+                MAP_SHARED, bar->fd, bar->fd_offset + offset);
+    if (*map == MAP_FAILED) {
+        *map = NULL;
+        return -1;
     }
 
-    if (!vdev->msix || vdev->msix->table_bar != bar) {
-        res->virtbase = mmap(NULL, res->size, PROT_READ | PROT_WRITE,
-                             MAP_SHARED, vdev->fd, res->offset);
-        if (res->virtbase == MAP_FAILED) {
-            goto slow;
+    memory_region_init_ram_ptr(submem, name, size, *map);
+    memory_region_add_subregion(mem, offset, submem);
+
+    return 0;
+}
+
+static void vfio_map_bar(VFIODevice *vdev, int nr, uint8_t type)
+{
+    VFIOBAR *bar = &vdev->bars[nr];
+    unsigned size = bar->size;
+    char name[64];
+
+    sprintf(name, "VFIO %04x:%02x:%02x.%x BAR %d", vdev->host.seg,
+            vdev->host.bus, vdev->host.dev, vdev->host.func, nr);
+
+    /* A "slow" read/write mapping underlies all BARs */
+    memory_region_init_io(&bar->mem, &vfio_bar_ops, bar, name, size);
+    pci_register_bar(&vdev->pdev, nr, type, &bar->mem);
+
+    if (type & PCI_BASE_ADDRESS_SPACE_IO) {
+        return; /* IO space is only slow, don't expect high perf here */
+    }
+
+    if (size & ~TARGET_PAGE_MASK) {
+        error_report("%s is too small to mmap, this may affect performance.\n",
+                     name);
+        return;
+    }
+
+    /*
+     * We can't mmap areas overlapping the MSIX vector table, so we
+     * potentially insert a direct-mapped subregion before and after it.
+     */
+    if (vdev->msix && vdev->msix->table_bar == nr) {
+        size = QEMU_ALIGN_DOWN(vdev->msix->table_offset, TARGET_PAGE_SIZE);
+    }
+         
+    if (size) {
+        strcat(name, " mmap");
+        if (vfio_mmap_bar(bar, &bar->mem, &bar->mmap_mem, &bar->mmap,
+                          size, 0, name)) {
+            error_report("%s Failed. Performance may be slow\n", name);
         }
-
-        memory_region_init_ram_ptr(&res->region,
-                                   name, res->size, res->virtbase);
-        return; /* Done */
     }
 
-    memory_region_init(&res->region, name, res->size);
+    if (vdev->msix && vdev->msix->table_bar == nr) {
+        unsigned start;
 
-    if (vdev->msix->table_offset) {
-        res->virtbase = mmap(NULL, vdev->msix->table_offset,
-                             PROT_READ | PROT_WRITE,
-                             MAP_SHARED, vdev->fd, res->offset);
-        if (res->virtbase == MAP_FAILED) {
-            memory_region_destroy(&res->region);
-            goto slow;
-        }
+        start = QEMU_ALIGN_UP(vdev->msix->table_offset +
+                              (vdev->msix->entries * PCI_MSIX_ENTRY_SIZE),
+                              TARGET_PAGE_SIZE);
 
-        memory_region_init_ram_ptr(&vdev->msix->region_lo, "lo",
-                                   vdev->msix->table_offset, res->virtbase);
-        memory_region_add_subregion(&res->region, 0, &vdev->msix->region_lo);
-    }
-
-    if (res->size > vdev->msix->table_offset + MSIX_PAGE_SIZE) {
-        off_t offset = vdev->msix->table_offset + MSIX_PAGE_SIZE;
-        size_t size = res->size - offset;
-
-        vdev->msix->virtbase = mmap(NULL, size, PROT_READ | PROT_WRITE,
-                                    MAP_SHARED, vdev->fd, res->offset + offset);
-        if (vdev->msix->virtbase == MAP_FAILED) {
-            if (res->virtbase) {
-                memory_region_del_subregion(&res->region,
-                                            &vdev->msix->region_lo);
-                munmap(res->virtbase, vdev->msix->table_offset);
-                memory_region_destroy(&vdev->msix->region_lo);
+        if (start < bar->size) {
+            size = bar->size - start;
+            strcat(name, " msix-hi");
+            /* MSIXInfo contains another MemoryRegion for this mapping */
+            if (vfio_mmap_bar(bar, &bar->mem, &vdev->msix->mmap_mem,
+                              &vdev->msix->mmap, size, start, name)) {
+                error_report("%s Failed. Performance may be slow\n", name);
             }
-            memory_region_destroy(&res->region);
-            goto slow;
         }
-
-        memory_region_init_ram_ptr(&vdev->msix->region_hi,
-                                   "hi", size, vdev->msix->virtbase);
-        memory_region_add_subregion(&res->region, offset,
-                                    &vdev->msix->region_hi);
     }
 
-    return; /* Done */
-
-slow:
-
-    res->slow = true;
-
-    DPRINTF("%s(%04x:%02x:%02x.%x) Using slow mapping for BAR %d\n",
-            __FUNCTION__, vdev->host.seg, vdev->host.bus,
-            vdev->host.dev, vdev->host.func, bar);
-
-    memory_region_init_io(&res->region, &vfio_resource_ops,
-                          res, name, res->size);
+    return;
 }
 
-static int vfio_map_resources(VFIODevice *vdev)
+static int vfio_map_bars(VFIODevice *vdev)
 {
     int i;
 
     for (i = 0; i < VFIO_PCI_ROM_REGION_INDEX; i++) {
-        PCIResource *res;
-        uint32_t bar;
-        uint8_t offset;
-        int ret, space;
-        const VMStateDescription *vmsd;
-        char name[32];
+        VFIOBAR *bar;
+        int ret;
+        uint32_t bar_val;
+        uint8_t bar_type;
 
-        res = &vdev->resources[i];
-        res->fd = vdev->fd;
-        res->bar = i;
-
-        if (!res->size) {
+        bar = &vdev->bars[i];
+        if (!bar->size) {
             continue;
         }
 
-        offset = PCI_BASE_ADDRESS_0 + (4 * i);
-        ret = pread(vdev->fd, &bar, sizeof(bar), vdev->config_offset + offset);
-        if (ret != sizeof(bar)) {
+        ret = pread(vdev->fd, &bar_val, sizeof(bar_val),
+                    vdev->config_offset + PCI_BASE_ADDRESS_0 + (4 * i));
+        if (ret != sizeof(bar_val)) {
             error_report("vfio: Failed to read BAR %d (%s)\n", i,
                          strerror(errno));
             return -1;
         }
 
-        bar = le32_to_cpu(bar);
-        space = bar & PCI_BASE_ADDRESS_SPACE;
+        bar_val = le32_to_cpu(bar_val);
+        bar_type = bar_val & (bar_val & PCI_BASE_ADDRESS_SPACE_IO ?
+                   ~PCI_BASE_ADDRESS_IO_MASK : PCI_BASE_ADDRESS_MEM_MASK);
 
-        vmsd = qdev_get_vmsd(DEVICE(&vdev->pdev));
+        vfio_map_bar(vdev, i, bar_type);
 
-        if (vmsd) {
-            snprintf(name, sizeof(name), "%s.bar%d", vmsd->name, i);
-        } else {
-            snprintf(name, sizeof(name), "%s.bar%d",
-                     object_get_typename(OBJECT(&vdev->pdev)), i);
-        }
-
-        if (space == PCI_BASE_ADDRESS_SPACE_MEMORY) {
-            res->mem = true;
-
-            vfio_map_region(vdev, i, name);
-
-            pci_register_bar(&vdev->pdev, i,
-                             bar & ~PCI_BASE_ADDRESS_MEM_MASK, &res->region);
-
-            if (bar & PCI_BASE_ADDRESS_MEM_TYPE_64) {
-                i++;
-            }
-
-            res->valid = true;
-        } else if (space == PCI_BASE_ADDRESS_SPACE_IO) {
-            memory_region_init_io(&res->region, &vfio_resource_ops, res,
-                                  name, res->size);
-
-            pci_register_bar(&vdev->pdev, i,
-                             PCI_BASE_ADDRESS_SPACE_IO, &res->region);
-            res->valid = true;
+        if (!(bar_type & PCI_BASE_ADDRESS_SPACE_IO) && 
+            bar_type & PCI_BASE_ADDRESS_MEM_TYPE_64) {
+            i++;
         }
     }
+
     return 0;
 }
 
-static void vfio_unmap_resources(VFIODevice *vdev)
+static void vfio_unmap_bars(VFIODevice *vdev)
 {
     int i;
-    PCIResource *res = vdev->resources;
 
-    for (i = 0; i < PCI_ROM_SLOT; i++, res++) {
-        if (res->valid) {
-            if (res->mem) {
-                vfio_unmap_region(vdev, i);
-            } else {
-                memory_region_destroy(&res->region);
-            }
-            res->valid = false;
-        }
+    for (i = 0; i < PCI_ROM_SLOT; i++) {
+        vfio_unmap_bar(vdev, i);
     }
 }
 
@@ -1462,8 +1418,10 @@ static int vfio_get_device(VFIOGroup *group, const char *name, VFIODevice *vdev)
                 (unsigned long)reg_info.size, (unsigned long)reg_info.offset,
                 (unsigned long)reg_info.flags);
 
-        vdev->resources[i].size = reg_info.size;
-        vdev->resources[i].offset = reg_info.offset;
+        vdev->bars[i].size = reg_info.size;
+        vdev->bars[i].fd_offset = reg_info.offset;
+        vdev->bars[i].fd = vdev->fd;
+        vdev->bars[i].nr = i;
     }
 
     reg_info.index = VFIO_PCI_ROM_REGION_INDEX;
@@ -1606,22 +1564,22 @@ static int vfio_initfn(struct PCIDevice *pdev)
         goto out;
     }
 
-    if (vfio_map_resources(vdev)) {
+    if (vfio_map_bars(vdev)) {
         goto out_msi;
     }
 
     if (vfio_add_capabilities(vdev)) {
-        goto out_resources;
+        goto out_bars;
     }
 
     if (vfio_enable_intx(vdev)) {
-        goto out_resources;
+        goto out_bars;
     }
 
     return 0;
 
-out_resources:
-    vfio_unmap_resources(vdev);
+out_bars:
+    vfio_unmap_bars(vdev);
 out_msi:
     vfio_teardown_msi(vdev);
 out:
@@ -1636,7 +1594,7 @@ static int vfio_exitfn(struct PCIDevice *pdev)
     VFIOGroup *group = vdev->group;
 
     vfio_disable_interrupts(vdev);
-    vfio_unmap_resources(vdev);
+    vfio_unmap_bars(vdev);
     vfio_teardown_msi(vdev);
     vfio_put_device(vdev);
     vfio_put_group(group);
@@ -1667,7 +1625,8 @@ static PropertyInfo qdev_prop_hostaddr = {
 };
 
 static Property vfio_pci_dev_properties[] = {
-    DEFINE_PROP("host", VFIODevice, host, qdev_prop_hostaddr, PCIHostDevice),
+    DEFINE_PROP("host", VFIODevice,
+                host, qdev_prop_hostaddr, VFIOPCIHostDevice),
     //TODO - support passed fds... is this necessary?
     //DEFINE_PROP_STRING("vfiofd", VFIODevice, vfiofd_name),
     //DEFINE_PROP_STRING("vfiogroupfd, VFIODevice, vfiogroupfd_name),
