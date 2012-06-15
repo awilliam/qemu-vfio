@@ -143,16 +143,10 @@ int msi_init(struct PCIDevice *dev, uint8_t offset,
         flags |= PCI_MSI_FLAGS_MASKBIT;
     }
 
-    config_offset = pci_find_capability(dev, PCI_CAP_ID_MSI);
-
     cap_size = msi_cap_sizeof(flags);
-
-    if (!config_offset) {
-        config_offset = pci_add_capability(dev, PCI_CAP_ID_MSI,
-                                           offset, cap_size);
-        if (config_offset < 0) {
-            return config_offset;
-        }
+    config_offset = pci_add_capability(dev, PCI_CAP_ID_MSI, offset, cap_size);
+    if (config_offset < 0) {
+        return config_offset;
     }
 
     dev->msi_cap = config_offset;

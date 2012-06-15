@@ -221,16 +221,20 @@ struct PCIDevice {
     /* MSI-X entries */
     int msix_entries_nr;
 
-    /* Space to store MSIX table */
-    uint8_t *msix_table_page;
+    /* Space to store MSIX table & pending bits array */
+    uint8_t *msix_table;
+    uint8_t *msix_pba;
+
     /* MMIO index used to map MSIX table and pending bit entries. */
-    MemoryRegion msix_mmio;
+    MemoryRegion msix_table_mmio;
+    MemoryRegion msix_pba_mmio;
+
     /* Reference-count for entries actually in use by driver. */
     unsigned *msix_entry_used;
-    /* Region including the MSI-X table */
-    uint32_t msix_bar_size;
+
     /* MSIX function mask set or MSIX disabled */
     bool msix_function_masked;
+
     /* Version id needed for VMState */
     int32_t version_id;
 

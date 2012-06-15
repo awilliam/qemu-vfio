@@ -27,88 +27,14 @@
 #define MSIX_ENABLE_MASK (PCI_MSIX_FLAGS_ENABLE >> 8)
 #define MSIX_MASKALL_MASK (PCI_MSIX_FLAGS_MASKALL >> 8)
 
-/* How much space does an MSIX table need. */
-/* The spec requires giving the table structure
- * a 4K aligned region all by itself. */
-#define MSIX_PAGE_SIZE 0x1000
-/* Reserve second half of the page for pending bits */
-#define MSIX_PAGE_PENDING (MSIX_PAGE_SIZE / 2)
-#define MSIX_MAX_ENTRIES 32
-
 static MSIMessage msix_get_message(PCIDevice *dev, unsigned vector)
 {
-    uint8_t *table_entry = dev->msix_table_page + vector * PCI_MSIX_ENTRY_SIZE;
+    uint8_t *table_entry = dev->msix_table + vector * PCI_MSIX_ENTRY_SIZE;
     MSIMessage msg;
 
     msg.address = pci_get_quad(table_entry + PCI_MSIX_ENTRY_LOWER_ADDR);
     msg.data = pci_get_long(table_entry + PCI_MSIX_ENTRY_DATA);
     return msg;
-}
-
-/* Add MSI-X capability to the config space for the device. */
-/* Given a bar and its size, add MSI-X table on top of it
- * and fill MSI-X capability in the config space.
- * Original bar size must be a power of 2 or 0.
- * New bar size is returned. */
-static int msix_add_config(struct PCIDevice *pdev, unsigned short nentries,
-                           unsigned bar_nr, unsigned bar_size)
-{
-    int config_offset;
-    uint8_t *config;
-
-    pdev->msix_bar_size = bar_size;
-
-    config_offset = pci_find_capability(pdev, PCI_CAP_ID_MSIX);
-
-    if (!config_offset) {
-        uint32_t new_size;
-
-        if (nentries < 1 || nentries > PCI_MSIX_FLAGS_QSIZE + 1)
-            return -EINVAL;
-        if (bar_size > 0x80000000)
-            return -ENOSPC;
-
-        /* Add space for MSI-X structures */
-        if (!bar_size) {
-            new_size = MSIX_PAGE_SIZE;
-        } else if (bar_size < MSIX_PAGE_SIZE) {
-            bar_size = MSIX_PAGE_SIZE;
-            new_size = MSIX_PAGE_SIZE * 2;
-        } else {
-            new_size = bar_size * 2;
-        }
-
-        pdev->msix_bar_size = new_size;
-        config_offset = pci_add_capability(pdev, PCI_CAP_ID_MSIX,
-                                       0,
-                                           MSIX_CAP_LENGTH);
-        if (config_offset < 0)
-            return config_offset;
-        config = pdev->config + config_offset;
-
-        pci_set_word(config + PCI_MSIX_FLAGS, nentries - 1);
-        /* Table on top of BAR */
-        pci_set_long(config + PCI_MSIX_TABLE, bar_size | bar_nr);
-        /* Pending bits on top of that */
-        pci_set_long(config + PCI_MSIX_PBA, (bar_size + MSIX_PAGE_PENDING) |
-                     bar_nr);
-    }
-    pdev->msix_cap = config_offset;
-    /* Make flags bit writable. */
-    pdev->wmask[config_offset + MSIX_CONTROL_OFFSET] |= MSIX_ENABLE_MASK |
-	    MSIX_MASKALL_MASK;
-    pdev->msix_function_masked = true;
-    return 0;
-}
-
-static uint64_t msix_mmio_read(void *opaque, target_phys_addr_t addr,
-                               unsigned size)
-{
-    PCIDevice *dev = opaque;
-    unsigned int offset = addr & (MSIX_PAGE_SIZE - 1) & ~0x3;
-    void *page = dev->msix_table_page;
-
-    return pci_get_long(page + offset);
 }
 
 static uint8_t msix_pending_mask(int vector)
@@ -118,7 +44,7 @@ static uint8_t msix_pending_mask(int vector)
 
 static uint8_t *msix_pending_byte(PCIDevice *dev, int vector)
 {
-    return dev->msix_table_page + MSIX_PAGE_PENDING + vector / 8;
+    return dev->msix_pba + vector / 8;
 }
 
 static int msix_is_pending(PCIDevice *dev, int vector)
@@ -139,7 +65,7 @@ static void msix_clr_pending(PCIDevice *dev, int vector)
 static bool msix_vector_masked(PCIDevice *dev, int vector, bool fmask)
 {
     unsigned offset = vector * PCI_MSIX_ENTRY_SIZE + PCI_MSIX_ENTRY_VECTOR_CTRL;
-    return fmask || dev->msix_table_page[offset] & PCI_MSIX_ENTRY_CTRL_MASKBIT;
+    return fmask || dev->msix_table[offset] & PCI_MSIX_ENTRY_CTRL_MASKBIT;
 }
 
 static bool msix_is_masked(PCIDevice *dev, int vector)
@@ -218,27 +144,29 @@ void msix_write_config(PCIDevice *dev, uint32_t addr,
     }
 }
 
-static void msix_mmio_write(void *opaque, target_phys_addr_t addr,
-                            uint64_t val, unsigned size)
+static uint64_t msix_table_mmio_read(void *opaque, target_phys_addr_t addr,
+                                     unsigned size)
 {
     PCIDevice *dev = opaque;
-    unsigned int offset = addr & (MSIX_PAGE_SIZE - 1) & ~0x3;
-    int vector = offset / PCI_MSIX_ENTRY_SIZE;
+
+    return pci_get_long(dev->msix_table + addr);
+}
+
+static void msix_table_mmio_write(void *opaque, target_phys_addr_t addr,
+                                  uint64_t val, unsigned size)
+{
+    PCIDevice *dev = opaque;
+    int vector = addr / PCI_MSIX_ENTRY_SIZE;
     bool was_masked;
 
-    /* MSI-X page includes a read-only PBA and a writeable Vector Control. */
-    if (vector >= dev->msix_entries_nr) {
-        return;
-    }
-
     was_masked = msix_is_masked(dev, vector);
-    pci_set_long(dev->msix_table_page + offset, val);
+    pci_set_long(dev->msix_table + addr, val);
     msix_handle_mask_update(dev, vector, was_masked);
 }
 
-static const MemoryRegionOps msix_mmio_ops = {
-    .read = msix_mmio_read,
-    .write = msix_mmio_write,
+static const MemoryRegionOps msix_table_mmio_ops = {
+    .read = msix_table_mmio_read,
+    .write = msix_table_mmio_write,
     .endianness = DEVICE_NATIVE_ENDIAN,
     .valid = {
         .min_access_size = 4,
@@ -246,16 +174,22 @@ static const MemoryRegionOps msix_mmio_ops = {
     },
 };
 
-static void msix_mmio_setup(PCIDevice *d, MemoryRegion *bar)
+static uint64_t msix_pba_mmio_read(void *opaque, target_phys_addr_t addr,
+                                   unsigned size)
 {
-    uint8_t *config = d->config + d->msix_cap;
-    uint32_t table = pci_get_long(config + PCI_MSIX_TABLE);
-    uint32_t offset = table & ~(MSIX_PAGE_SIZE - 1);
-    /* TODO: for assigned devices, we'll want to make it possible to map
-     * pending bits separately in case they are in a separate bar. */
+    PCIDevice *dev = opaque;
 
-    memory_region_add_subregion(bar, offset, &d->msix_mmio);
+    return pci_get_long(dev->msix_pba + addr);
 }
+
+static const MemoryRegionOps msix_pba_mmio_ops = {
+    .read = msix_pba_mmio_read,
+    .endianness = DEVICE_NATIVE_ENDIAN,
+    .valid = {
+        .min_access_size = 4,
+        .max_access_size = 4,
+    },
+};
 
 static void msix_mask_all(struct PCIDevice *dev, unsigned nentries)
 {
@@ -266,52 +200,148 @@ static void msix_mask_all(struct PCIDevice *dev, unsigned nentries)
             vector * PCI_MSIX_ENTRY_SIZE + PCI_MSIX_ENTRY_VECTOR_CTRL;
         bool was_masked = msix_is_masked(dev, vector);
 
-        dev->msix_table_page[offset] |= PCI_MSIX_ENTRY_CTRL_MASKBIT;
+        dev->msix_table[offset] |= PCI_MSIX_ENTRY_CTRL_MASKBIT;
         msix_handle_mask_update(dev, vector, was_masked);
     }
 }
 
-/* Initialize the MSI-X structures. Note: if MSI-X is supported, BAR size is
- * modified, it should be retrieved with msix_bar_size. */
+/* Add MSI-X capability to the config space for the device. */
+static int msix_add_config(struct PCIDevice *pdev, unsigned short nentries,
+                           uint8_t table_bar, unsigned table_offset,
+                           uint8_t pba_bar, unsigned pba_offset, uint8_t pos)
+{
+    int config_offset;
+    uint8_t *config;
+
+    if (nentries < 1 || nentries > PCI_MSIX_FLAGS_QSIZE + 1)
+        return -EINVAL;
+
+    config_offset = pci_add_capability(pdev, PCI_CAP_ID_MSIX,
+                                       pos, MSIX_CAP_LENGTH);
+    if (config_offset < 0)
+        return config_offset;
+
+    config = pdev->config + config_offset;
+
+    pci_set_word(config + PCI_MSIX_FLAGS, nentries - 1);
+    pci_set_long(config + PCI_MSIX_TABLE, table_offset | table_bar);
+    pci_set_long(config + PCI_MSIX_PBA, pba_offset | pba_bar);
+
+    pdev->msix_cap = config_offset;
+
+    /* Make flags bit writable. */
+    pdev->wmask[config_offset + MSIX_CONTROL_OFFSET] |= MSIX_ENABLE_MASK |
+	    MSIX_MASKALL_MASK;
+
+    pdev->msix_function_masked = true;
+
+    return 0;
+}
+
+/* Clean up resources for the device. */
+void msix_uninit(PCIDevice *dev, MemoryRegion *table_bar, MemoryRegion *pba_bar)
+{
+    if (!(dev->cap_present & QEMU_PCI_CAP_MSIX))
+        return;
+
+    pci_del_capability(dev, PCI_CAP_ID_MSIX, MSIX_CAP_LENGTH);
+    dev->msix_cap = 0;
+    dev->msix_entries_nr = 0;
+
+    memory_region_del_subregion(pba_bar, &dev->msix_pba_mmio);
+    memory_region_destroy(&dev->msix_pba_mmio);
+    g_free(dev->msix_pba);
+    dev->msix_pba = NULL;
+
+    memory_region_del_subregion(table_bar, &dev->msix_table_mmio);
+    memory_region_destroy(&dev->msix_table_mmio);
+    g_free(dev->msix_table);
+    dev->msix_table = NULL;
+
+    g_free(dev->msix_entry_used);
+    dev->msix_entry_used = NULL;
+    dev->cap_present &= ~QEMU_PCI_CAP_MSIX;
+}
+
+/* Initialize the MSI-X structures */
 int msix_init(struct PCIDevice *dev, unsigned short nentries,
-              MemoryRegion *bar,
-              unsigned bar_nr, unsigned bar_size)
+              MemoryRegion *table_bar, uint8_t table_bar_nr,
+              unsigned table_offset, MemoryRegion *pba_bar,
+              uint8_t pba_bar_nr, unsigned pba_offset, uint8_t cap_pos)
 {
     int ret;
+    unsigned table_size, pba_size;
 
     /* Nothing to do if MSI is not supported by interrupt controller */
     if (!msi_supported) {
         return -ENOTSUP;
     }
-    if (nentries > MSIX_MAX_ENTRIES)
+
+    table_size = nentries * PCI_MSIX_ENTRY_SIZE;
+    pba_size = QEMU_ALIGN_UP(nentries, 64) / 8;
+
+    if (table_bar_nr == pba_bar_nr &&
+        ranges_overlap(table_offset, table_size, pba_offset, pba_size)) {
         return -EINVAL;
+    }
+            
+    dev->msix_table = g_malloc0(table_size);
+    dev->msix_pba = g_malloc0(pba_size);
+    dev->msix_entry_used = g_malloc0(nentries * sizeof *dev->msix_entry_used);
+    dev->msix_entries_nr = nentries;
+    dev->cap_present |= QEMU_PCI_CAP_MSIX;
 
-    dev->msix_entry_used = g_malloc0(MSIX_MAX_ENTRIES *
-                                        sizeof *dev->msix_entry_used);
-
-    dev->msix_table_page = g_malloc0(MSIX_PAGE_SIZE);
     msix_mask_all(dev, nentries);
 
-    memory_region_init_io(&dev->msix_mmio, &msix_mmio_ops, dev,
-                          "msix", MSIX_PAGE_SIZE);
+    memory_region_init_io(&dev->msix_table_mmio, &msix_table_mmio_ops, dev,
+                          "msix", table_size);
+    memory_region_add_subregion(table_bar, table_offset, &dev->msix_table_mmio);
 
-    dev->msix_entries_nr = nentries;
-    ret = msix_add_config(dev, nentries, bar_nr, bar_size);
-    if (ret)
-        goto err_config;
+    memory_region_init_io(&dev->msix_pba_mmio, &msix_pba_mmio_ops, dev,
+                          "msix-pba", pba_size);
+    memory_region_add_subregion(pba_bar, pba_offset, &dev->msix_pba_mmio);
 
-    dev->cap_present |= QEMU_PCI_CAP_MSIX;
-    msix_mmio_setup(dev, bar);
+    ret = msix_add_config(dev, nentries, table_bar_nr, table_offset,
+                          pba_bar_nr, pba_offset, cap_pos);
+    if (ret) {
+        msix_uninit(dev, table_bar, pba_bar);
+        return ret;
+    }
+
     return 0;
+}
 
-err_config:
-    dev->msix_entries_nr = 0;
-    memory_region_destroy(&dev->msix_mmio);
-    g_free(dev->msix_table_page);
-    dev->msix_table_page = NULL;
-    g_free(dev->msix_entry_used);
-    dev->msix_entry_used = NULL;
-    return ret;
+int msix_init_bar(PCIDevice *pdev, unsigned short nentries,
+                  MemoryRegion *bar, uint8_t bar_nr, const char *name)
+{
+    int ret;
+
+    /*
+     * Migration compatibility dictates that this remains a 4k
+     * BAR with the vector table in the lower half and PBA in
+     * the upper half.
+     */
+    if (nentries * PCI_MSIX_ENTRY_SIZE > 2048) {
+        return -EINVAL;
+    }
+
+    memory_region_init(bar, name, 4096);
+
+    ret = msix_init(pdev, nentries, bar, bar_nr, 0, bar, bar_nr, 2048, 0);
+    if (ret) {
+        memory_region_destroy(bar);
+        return ret;
+    }
+
+    pci_register_bar(pdev, bar_nr, PCI_BASE_ADDRESS_SPACE_MEMORY, bar);
+
+    return 0;
+}
+
+void msix_uninit_bar(PCIDevice *pdev, MemoryRegion *bar)
+{
+    msix_uninit(pdev, bar, bar);
+    memory_region_destroy(bar);
 }
 
 static void msix_free_irq_entries(PCIDevice *dev)
@@ -324,25 +354,6 @@ static void msix_free_irq_entries(PCIDevice *dev)
     }
 }
 
-/* Clean up resources for the device. */
-int msix_uninit(PCIDevice *dev, MemoryRegion *bar)
-{
-    if (!(dev->cap_present & QEMU_PCI_CAP_MSIX))
-        return 0;
-    pci_del_capability(dev, PCI_CAP_ID_MSIX, MSIX_CAP_LENGTH);
-    dev->msix_cap = 0;
-    msix_free_irq_entries(dev);
-    dev->msix_entries_nr = 0;
-    memory_region_del_subregion(bar, &dev->msix_mmio);
-    memory_region_destroy(&dev->msix_mmio);
-    g_free(dev->msix_table_page);
-    dev->msix_table_page = NULL;
-    g_free(dev->msix_entry_used);
-    dev->msix_entry_used = NULL;
-    dev->cap_present &= ~QEMU_PCI_CAP_MSIX;
-    return 0;
-}
-
 void msix_save(PCIDevice *dev, QEMUFile *f)
 {
     unsigned n = dev->msix_entries_nr;
@@ -351,8 +362,8 @@ void msix_save(PCIDevice *dev, QEMUFile *f)
         return;
     }
 
-    qemu_put_buffer(f, dev->msix_table_page, n * PCI_MSIX_ENTRY_SIZE);
-    qemu_put_buffer(f, dev->msix_table_page + MSIX_PAGE_PENDING, (n + 7) / 8);
+    qemu_put_buffer(f, dev->msix_table, n * PCI_MSIX_ENTRY_SIZE);
+    qemu_put_buffer(f, dev->msix_pba, (n + 7) / 8);
 }
 
 /* Should be called after restoring the config space. */
@@ -366,8 +377,8 @@ void msix_load(PCIDevice *dev, QEMUFile *f)
     }
 
     msix_free_irq_entries(dev);
-    qemu_get_buffer(f, dev->msix_table_page, n * PCI_MSIX_ENTRY_SIZE);
-    qemu_get_buffer(f, dev->msix_table_page + MSIX_PAGE_PENDING, (n + 7) / 8);
+    qemu_get_buffer(f, dev->msix_table, n * PCI_MSIX_ENTRY_SIZE);
+    qemu_get_buffer(f, dev->msix_pba, (n + 7) / 8);
     msix_update_function_masked(dev);
 
     for (vector = 0; vector < n; vector++) {
@@ -387,13 +398,6 @@ int msix_enabled(PCIDevice *dev)
     return (dev->cap_present & QEMU_PCI_CAP_MSIX) &&
         (dev->config[dev->msix_cap + MSIX_CONTROL_OFFSET] &
          MSIX_ENABLE_MASK);
-}
-
-/* Size of bar where MSI-X table resides, or 0 if MSI-X not supported. */
-uint32_t msix_bar_size(PCIDevice *dev)
-{
-    return (dev->cap_present & QEMU_PCI_CAP_MSIX) ?
-        dev->msix_bar_size : 0;
 }
 
 /* Send an MSI-X message */
@@ -417,10 +421,14 @@ void msix_reset(PCIDevice *dev)
 {
     if (!(dev->cap_present & QEMU_PCI_CAP_MSIX))
         return;
+
     msix_free_irq_entries(dev);
+
     dev->config[dev->msix_cap + MSIX_CONTROL_OFFSET] &=
 	    ~dev->wmask[dev->msix_cap + MSIX_CONTROL_OFFSET];
-    memset(dev->msix_table_page, 0, MSIX_PAGE_SIZE);
+
+    memset(dev->msix_table, 0, dev->msix_entries_nr * PCI_MSIX_ENTRY_SIZE);
+    memset(dev->msix_pba, 0, QEMU_ALIGN_UP(dev->msix_entries_nr, 64) / 8);
     msix_mask_all(dev, dev->msix_entries_nr);
 }
 
