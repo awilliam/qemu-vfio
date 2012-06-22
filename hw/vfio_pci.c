@@ -221,7 +221,7 @@ static void vfio_update_irq(Notifier *notify, void *data)
     vdev->intx.irq = irq;
 
     if (irq < 0) {
-        fprintf(stderr, "vfio: Error - INTx moved to IRQ %d\n", irq);
+        error_report("vfio: Error - INTx moved to IRQ %d\n", irq);
         return;
     }
 
@@ -261,7 +261,7 @@ static int vfio_enable_intx(VFIODevice *vdev)
     pci_add_irq_update_notifier(&vdev->pdev, &vdev->intx.update_irq);
 
     if (event_notifier_init(&vdev->intx.interrupt, 0)) {
-        fprintf(stderr, "vfio: Error: event_notifier_init failed\n");
+        error_report("vfio: Error: event_notifier_init failed\n");
         g_free(irq_set);
         return -1;
     }
@@ -270,8 +270,8 @@ static int vfio_enable_intx(VFIODevice *vdev)
     qemu_set_fd_handler(*fd, vfio_intx_interrupt, NULL, vdev);
 
     if (ioctl(vdev->fd, VFIO_DEVICE_SET_IRQS, irq_set)) {
-        fprintf(stderr, "vfio: Error: Failed to setup INTx fd %s\n",
-                strerror(errno));
+        error_report("vfio: Error: Failed to setup INTx fd %s\n",
+                     strerror(errno));
         g_free(irq_set);
         return -1;
     }
@@ -333,7 +333,7 @@ static void vfio_msi_interrupt(void *opaque)
     } else if (vdev->interrupt == INT_MSI) {
         msi_notify(&vdev->pdev, vec->vector);
     } else {
-        fprintf(stderr, "vfio: MSI interrupt receieved, but not enabled?\n");
+        error_report("vfio: MSI interrupt receieved, but not enabled?\n");
     }
 }
 
@@ -366,7 +366,7 @@ retry:
         vdev->msi_vectors[i].vector = i;
 
         if (event_notifier_init(&vdev->msi_vectors[i].interrupt, 0)) {
-            fprintf(stderr, "vfio: Error: event_notifier_init failed\n");
+            error_report("vfio: Error: event_notifier_init failed\n");
         }
 
         fd = event_notifier_get_fd(&vdev->msi_vectors[i].interrupt);
@@ -376,15 +376,15 @@ retry:
         fds[i] = fd;
 
         if (msix && msix_vector_use(&vdev->pdev, i) < 0) {
-            fprintf(stderr, "vfio: Error msix_vector_use\n");
+            error_report("vfio: Error msix_vector_use\n");
         }
     }
 
     ret = ioctl(vdev->fd, VFIO_DEVICE_SET_IRQS, irq_set);
     if (ret) {
         if (ret < 0) {
-            fprintf(stderr, "vfio: Error: Failed to setup MSI/X fds %s\n",
-                    strerror(errno));
+            error_report("vfio: Error: Failed to setup MSI/X fds %s\n",
+                         strerror(errno));
         } else if (ret != vdev->nr_vectors) {
             DPRINTF("%s(): Unable to allocate %d MSI vectors, retry with %d\n",
                     __FUNCTION__, irq_set->count, ret);
@@ -475,8 +475,8 @@ static void vfio_resource_write(void *opaque, target_phys_addr_t addr,
     }
 
     if (pwrite(res->fd, tmp, size, res->offset + addr) != size) {
-        fprintf(stderr, "%s(,0x%"PRIx64", 0x%"PRIx64", %d) failed: %s\n",
-                __FUNCTION__, addr, data, size, strerror(errno));
+        error_report("%s(,0x%"PRIx64", 0x%"PRIx64", %d) failed: %s\n",
+                     __FUNCTION__, addr, data, size, strerror(errno));
     }
 
     DPRINTF("%s(BAR%d+0x%"PRIx64", 0x%"PRIx64", %d)\n",
@@ -491,8 +491,8 @@ static uint64_t vfio_resource_read(void *opaque,
     uint64_t data = 0;
 
     if (pread(res->fd, tmp, size, res->offset + addr) != size) {
-        fprintf(stderr, "%s(,0x%"PRIx64", %d) failed: %s\n",
-                __FUNCTION__, addr, size, strerror(errno));
+        error_report("%s(,0x%"PRIx64", %d) failed: %s\n",
+                     __FUNCTION__, addr, size, strerror(errno));
         return (uint64_t)-1;
     }
 
@@ -539,10 +539,10 @@ static uint32_t vfio_pci_read_config(PCIDevice *pdev, uint32_t addr, int len)
         val = pci_default_read_config(pdev, addr, len);
     } else {
         if (pread(vdev->fd, &val, len, vdev->config_offset + addr) != len) {
-            fprintf(stderr, "%s(%04x:%02x:%02x.%x, 0x%x, 0x%x) failed: %s\n",
-                    __FUNCTION__, vdev->host.seg, vdev->host.bus,
-                    vdev->host.dev, vdev->host.func, addr, len,
-                    strerror(errno));
+            error_report("%s(%04x:%02x:%02x.%x, 0x%x, 0x%x) failed: %s\n",
+                         __FUNCTION__, vdev->host.seg, vdev->host.bus,
+                         vdev->host.dev, vdev->host.func, addr, len,
+                         strerror(errno));
             return -1;
         }
         val = le32_to_cpu(val);
@@ -581,9 +581,10 @@ static void vfio_pci_write_config(PCIDevice *pdev, uint32_t addr,
 
     /* Write everything to VFIO, let it filter out what we can't write */
     if (pwrite(vdev->fd, &val_le, len, vdev->config_offset + addr) != len) {
-        fprintf(stderr, "%s(%04x:%02x:%02x.%x, 0x%x, 0x%x, 0x%x) failed: %s\n",
-                __FUNCTION__, vdev->host.seg, vdev->host.bus, vdev->host.dev,
-                vdev->host.func, addr, val, len, strerror(errno));
+        error_report("%s(%04x:%02x:%02x.%x, 0x%x, 0x%x, 0x%x) failed: %s\n",
+                     __FUNCTION__, vdev->host.seg, vdev->host.bus,
+                     vdev->host.dev, vdev->host.func, addr, val, len,
+                     strerror(errno));
     }
 
     /* Write standard header bits to emulation */
@@ -784,7 +785,7 @@ static int vfio_setup_msi(VFIODevice *vdev)
                 vdev->host.bus, vdev->host.dev, vdev->host.func, pos);
 
         if (msi_init(&vdev->pdev, pos, entries, msi_64bit, msi_maskbit) < 0) {
-            fprintf(stderr, "vfio: msi_init failed\n");
+            error_report("vfio: msi_init failed\n");
             return -1;
         }
         vdev->msi_cap_size = 0xa + (msi_maskbit ? 0xa : 0) +
@@ -952,8 +953,8 @@ static int vfio_map_resources(VFIODevice *vdev)
         offset = PCI_BASE_ADDRESS_0 + (4 * i);
         ret = pread(vdev->fd, &bar, sizeof(bar), vdev->config_offset + offset);
         if (ret != sizeof(bar)) {
-            fprintf(stderr, "vfio: Failed to read BAR %d (%s)\n",
-                    i, strerror(errno));
+            error_report("vfio: Failed to read BAR %d (%s)\n", i,
+                         strerror(errno));
             return -1;
         }
 
@@ -979,7 +980,7 @@ static int vfio_map_resources(VFIODevice *vdev)
                               &res->region, i, res->size) < 0) {
                     vfio_unmap_region(vdev, i);
 
-                    fprintf(stderr, "vfio: msix_init failed\n");
+                    error_report("vfio: msix_init failed\n");
                     return -1;
                 }
             }
@@ -1064,8 +1065,8 @@ static int vfio_load_rom(VFIODevice *vdev)
             if (errno == EINTR || errno == EAGAIN) {
                 continue;
             }
-            fprintf(stderr, "vfio: Error reading device ROM: %s\n",
-                    strerror(errno));
+            error_report("vfio: Error reading device ROM: %s\n",
+                         strerror(errno));
             memory_region_destroy(&vdev->pdev.rom);
             return -1;
         }
@@ -1307,7 +1308,7 @@ static int vfio_get_device(VFIOGroup *group, const char *name, VFIODevice *vdev)
 
     vdev->reset_works = !!(dev_info.flags & VFIO_DEVICE_FLAGS_RESET);
     if (!vdev->reset_works) {
-        fprintf(stderr, "Warning, device %s does not support reset\n", name);
+        error_report("Warning, device %s does not support reset\n", name);
     }
 
     if (dev_info.num_regions != VFIO_PCI_NUM_REGIONS) {
@@ -1464,7 +1465,7 @@ static int vfio_initfn(struct PCIDevice *pdev)
     ret = pread(vdev->fd, vdev->pdev.config,
                 pci_config_size(&vdev->pdev), vdev->config_offset);
     if (ret < (int)pci_config_size(&vdev->pdev)) {
-        fprintf(stderr, "vfio: Failed to read device config space\n");
+        error_report("vfio: Failed to read device config space\n");
         goto out;
     }
 
@@ -1520,9 +1521,10 @@ static void vfio_reset(DeviceState *dev)
     }
 
     if (ioctl(vdev->fd, VFIO_DEVICE_RESET)) {
-        fprintf(stderr, "vfio: Error unable to reset physical device "
-                "(%04x:%02x:%02x.%x): %s\n", vdev->host.seg, vdev->host.bus,
-                vdev->host.dev, vdev->host.func, strerror(errno));
+        error_report("vfio: Error unable to reset physical device "
+                     "(%04x:%02x:%02x.%x): %s\n", vdev->host.seg,
+                     vdev->host.bus, vdev->host.dev, vdev->host.func,
+                     strerror(errno));
     }
 }
 
