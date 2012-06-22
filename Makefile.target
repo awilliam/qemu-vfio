@@ -141,22 +141,8 @@ QEMU_CFLAGS += $(VNC_PNG_CFLAGS)
 obj-$(CONFIG_XEN) += xen-all.o xen-mapcache.o
 obj-$(CONFIG_NO_XEN) += xen-stub.o
 
-obj-i386-$(CONFIG_XEN) += xen_platform.o xen_apic.o
-
-# Inter-VM PCI shared memory
-CONFIG_IVSHMEM =
-ifeq ($(CONFIG_KVM), y)
-  ifeq ($(CONFIG_PCI), y)
-    CONFIG_IVSHMEM = y
-  endif
-endif
-obj-$(CONFIG_IVSHMEM) += ivshmem.o
-
 # VFIO PCI device assignment
 obj-$(CONFIG_VFIO_PCI) += vfio_pci.o
-
-# Generic hotplugging
-obj-y += device-hotplug.o
 
 # Hardware support
 ifeq ($(TARGET_ARCH), sparc64)
