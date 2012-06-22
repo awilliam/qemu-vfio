@@ -3718,12 +3718,9 @@ case "$target_arch2" in
   *)
     echo "CONFIG_NO_XEN=y" >> $config_target_mak
 esac
-case "$target_arch2" in
-  i386|x86_64)
-    if test "$vfio_pci" = "yes" -a "$target_softmmu" = "yes" ; then
-      echo "CONFIG_VFIO_PCI=y" >> $config_target_mak
-    fi
-esac
+if test "$vfio_pci" = "yes" -a "$target_softmmu" = "yes" ; then
+  echo "CONFIG_VFIO_PCI=y" >> $config_target_mak
+fi
 case "$target_arch2" in
   i386|x86_64|ppcemb|ppc|ppc64|s390x)
     # Make sure the target and host cpus are compatible

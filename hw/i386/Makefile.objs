@@ -9,5 +9,6 @@ obj-y += pc_sysfw.o
 obj-$(CONFIG_XEN) += xen_platform.o xen_apic.o
 obj-y += kvm/
 obj-$(CONFIG_SPICE) += qxl.o qxl-logger.o qxl-render.o
+obj-$(CONFIG_VFIO_PCI) += vfio_pci.o
 
 obj-y := $(addprefix ../,$(obj-y))

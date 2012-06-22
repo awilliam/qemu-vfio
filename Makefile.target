@@ -141,9 +141,6 @@ QEMU_CFLAGS += $(VNC_PNG_CFLAGS)
 obj-$(CONFIG_XEN) += xen-all.o xen-mapcache.o
 obj-$(CONFIG_NO_XEN) += xen-stub.o
 
-# VFIO PCI device assignment
-obj-$(CONFIG_VFIO_PCI) += vfio_pci.o
-
 # Hardware support
 ifeq ($(TARGET_ARCH), sparc64)
 obj-y += hw/sparc64/
