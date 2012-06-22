@@ -195,7 +195,7 @@ void msix_write_config(PCIDevice *dev, uint32_t addr,
     int vector;
     bool was_masked;
 
-    if (!range_covers_byte(addr, len, enable_pos)) {
+    if (!msix_present(dev) || !range_covers_byte(addr, len, enable_pos)) {
         return;
     }
 
@@ -327,8 +327,9 @@ static void msix_free_irq_entries(PCIDevice *dev)
 /* Clean up resources for the device. */
 int msix_uninit(PCIDevice *dev, MemoryRegion *bar)
 {
-    if (!(dev->cap_present & QEMU_PCI_CAP_MSIX))
+    if (!msix_present(dev)) {
         return 0;
+    }
     pci_del_capability(dev, PCI_CAP_ID_MSIX, MSIX_CAP_LENGTH);
     dev->msix_cap = 0;
     msix_free_irq_entries(dev);
@@ -347,7 +348,7 @@ void msix_save(PCIDevice *dev, QEMUFile *f)
 {
     unsigned n = dev->msix_entries_nr;
 
-    if (!(dev->cap_present & QEMU_PCI_CAP_MSIX)) {
+    if (!msix_present(dev)) {
         return;
     }
 
@@ -361,7 +362,7 @@ void msix_load(PCIDevice *dev, QEMUFile *f)
     unsigned n = dev->msix_entries_nr;
     unsigned int vector;
 
-    if (!(dev->cap_present & QEMU_PCI_CAP_MSIX)) {
+    if (!msix_present(dev)) {
         return;
     }
 
@@ -415,8 +416,9 @@ void msix_notify(PCIDevice *dev, unsigned vector)
 
 void msix_reset(PCIDevice *dev)
 {
-    if (!(dev->cap_present & QEMU_PCI_CAP_MSIX))
+    if (!msix_present(dev)) {
         return;
+    }
     msix_free_irq_entries(dev);
     dev->config[dev->msix_cap + MSIX_CONTROL_OFFSET] &=
 	    ~dev->wmask[dev->msix_cap + MSIX_CONTROL_OFFSET];
@@ -455,8 +457,9 @@ void msix_vector_unuse(PCIDevice *dev, unsigned vector)
 
 void msix_unuse_all_vectors(PCIDevice *dev)
 {
-    if (!(dev->cap_present & QEMU_PCI_CAP_MSIX))
+    if (!msix_present(dev)) {
         return;
+    }
     msix_free_irq_entries(dev);
 }
 

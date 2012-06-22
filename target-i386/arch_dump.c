@@ -6,8 +6,8 @@
  * Authors:
  *     Wen Congyang <wency@cn.fujitsu.com>
  *
- * This work is licensed under the terms of the GNU GPL, version 2.  See
- * the COPYING file in the top-level directory.
+ * This work is licensed under the terms of the GNU GPL, version 2 or later.
+ * See the COPYING file in the top-level directory.
  *
  */
 
@@ -415,7 +415,7 @@ int cpu_get_dump_info(ArchDumpInfo *info)
     return 0;
 }
 
-size_t cpu_get_note_size(int class, int machine, int nr_cpus)
+ssize_t cpu_get_note_size(int class, int machine, int nr_cpus)
 {
     int name_size = 5; /* "CORE" or "QEMU" */
     size_t elf_note_size = 0;

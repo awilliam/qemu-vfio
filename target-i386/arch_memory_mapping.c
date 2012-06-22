@@ -6,13 +6,14 @@
  * Authors:
  *     Wen Congyang <wency@cn.fujitsu.com>
  *
- * This work is licensed under the terms of the GNU GPL, version 2.  See
- * the COPYING file in the top-level directory.
+ * This work is licensed under the terms of the GNU GPL, version 2 or later.
+ * See the COPYING file in the top-level directory.
  *
  */
 
 #include "cpu.h"
 #include "cpu-all.h"
+#include "memory_mapping.h"
 
 /* PAE Paging or IA-32e Paging */
 static void walk_pte(MemoryMappingList *list, target_phys_addr_t pte_start_addr,

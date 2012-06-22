@@ -81,7 +81,7 @@ do { \
 #define CCID_CONTROL_GET_DATA_RATES         0x3
 
 #define CCID_PRODUCT_DESCRIPTION        "QEMU USB CCID"
-#define CCID_VENDOR_DESCRIPTION         "QEMU " QEMU_VERSION
+#define CCID_VENDOR_DESCRIPTION         "QEMU"
 #define CCID_INTERFACE_NAME             "CCID Interface"
 #define CCID_SERIAL_NUMBER_STRING       "1"
 /*
@@ -401,7 +401,7 @@ enum {
 };
 
 static const USBDescStrings desc_strings = {
-    [STR_MANUFACTURER]  = "QEMU " QEMU_VERSION,
+    [STR_MANUFACTURER]  = "QEMU",
     [STR_PRODUCT]       = "QEMU USB CCID",
     [STR_SERIALNUMBER]  = "1",
     [STR_INTERFACE]     = "CCID Interface",
@@ -1055,13 +1055,18 @@ static Answer *ccid_peek_next_answer(USBCCIDState *s)
         : &s->pending_answers[s->pending_answers_start % PENDING_ANSWERS_NUM];
 }
 
-static struct BusInfo ccid_bus_info = {
-    .name = "ccid-bus",
-    .size = sizeof(CCIDBus),
-    .props = (Property[]) {
-        DEFINE_PROP_UINT32("slot", struct CCIDCardState, slot, 0),
-        DEFINE_PROP_END_OF_LIST(),
-    }
+static Property ccid_props[] = {
+    DEFINE_PROP_UINT32("slot", struct CCIDCardState, slot, 0),
+    DEFINE_PROP_END_OF_LIST(),
+};
+
+#define TYPE_CCID_BUS "ccid-bus"
+#define CCID_BUS(obj) OBJECT_CHECK(CCIDBus, (obj), TYPE_CCID_BUS)
+
+static const TypeInfo ccid_bus_info = {
+    .name = TYPE_CCID_BUS,
+    .parent = TYPE_BUS,
+    .instance_size = sizeof(CCIDBus),
 };
 
 void ccid_card_send_apdu_to_guest(CCIDCardState *card,
@@ -1191,7 +1196,7 @@ static int ccid_initfn(USBDevice *dev)
 
     usb_desc_create_serial(dev);
     usb_desc_init(dev);
-    qbus_create_inplace(&s->bus.qbus, &ccid_bus_info, &dev->qdev, NULL);
+    qbus_create_inplace(&s->bus.qbus, TYPE_CCID_BUS, &dev->qdev, NULL);
     s->intr = usb_ep_get(dev, USB_TOKEN_IN, CCID_INT_IN_EP);
     s->bus.qbus.allow_hotplug = 1;
     s->card = NULL;
@@ -1342,9 +1347,10 @@ static TypeInfo ccid_info = {
 static void ccid_card_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *k = DEVICE_CLASS(klass);
-    k->bus_info = &ccid_bus_info;
+    k->bus_type = TYPE_CCID_BUS;
     k->init = ccid_card_init;
     k->exit = ccid_card_exit;
+    k->props = ccid_props;
 }
 
 static TypeInfo ccid_card_type_info = {
@@ -1358,6 +1364,7 @@ static TypeInfo ccid_card_type_info = {
 
 static void ccid_register_types(void)
 {
+    type_register_static(&ccid_bus_info);
     type_register_static(&ccid_card_type_info);
     type_register_static(&ccid_info);
     usb_legacy_register(CCID_DEV_NAME, "ccid", NULL);

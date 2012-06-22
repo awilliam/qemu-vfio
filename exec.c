@@ -216,16 +216,6 @@ static void memory_map_init(void);
 static MemoryRegion io_mem_watch;
 #endif
 
-/* log support */
-#ifdef WIN32
-static const char *logfilename = "qemu.log";
-#else
-static const char *logfilename = "/tmp/qemu.log";
-#endif
-FILE *logfile;
-int loglevel;
-static int log_append = 0;
-
 /* statistics */
 static int tb_flush_count;
 static int tb_phys_invalidate_count;
@@ -1076,11 +1066,11 @@ TranslationBlock *tb_gen_code(CPUArchState *env,
 }
 
 /*
- * invalidate all TBs which intersect with the target physical pages
- * starting in range [start;end[. NOTE: start and end may refer to
- * different physical pages. 'is_cpu_write_access' should be true if called
- * from a real cpu write access: the virtual CPU will exit the current
- * TB if code is modified inside this TB.
+ * Invalidate all TBs which intersect with the target physical address range
+ * [start;end[. NOTE: start and end may refer to *different* physical pages.
+ * 'is_cpu_write_access' should be true if called from a real cpu write
+ * access: the virtual CPU will exit the current TB if code is modified inside
+ * this TB.
  */
 void tb_invalidate_phys_range(tb_page_addr_t start, tb_page_addr_t end,
                               int is_cpu_write_access)
@@ -1092,11 +1082,13 @@ void tb_invalidate_phys_range(tb_page_addr_t start, tb_page_addr_t end,
     }
 }
 
-/* invalidate all TBs which intersect with the target physical page
-   starting in range [start;end[. NOTE: start and end must refer to
-   the same physical page. 'is_cpu_write_access' should be true if called
-   from a real cpu write access: the virtual CPU will exit the current
-   TB if code is modified inside this TB. */
+/*
+ * Invalidate all TBs which intersect with the target physical address range
+ * [start;end[. NOTE: start and end must refer to the *same* physical page.
+ * 'is_cpu_write_access' should be true if called from a real cpu write
+ * access: the virtual CPU will exit the current TB if code is modified inside
+ * this TB.
+ */
 void tb_invalidate_phys_page_range(tb_page_addr_t start, tb_page_addr_t end,
                                    int is_cpu_write_access)
 {
@@ -1492,7 +1484,8 @@ void tb_invalidate_phys_addr(target_phys_addr_t addr)
 
 static void breakpoint_invalidate(CPUArchState *env, target_ulong pc)
 {
-    tb_invalidate_phys_addr(cpu_get_phys_page_debug(env, pc));
+    tb_invalidate_phys_addr(cpu_get_phys_page_debug(env, pc) |
+            (pc & ~TARGET_PAGE_MASK));
 }
 #endif
 #endif /* TARGET_HAS_ICE */
@@ -1670,46 +1663,6 @@ void cpu_single_step(CPUArchState *env, int enabled)
 #endif
 }
 
-/* enable or disable low levels log */
-void cpu_set_log(int log_flags)
-{
-    loglevel = log_flags;
-    if (loglevel && !logfile) {
-        logfile = fopen(logfilename, log_append ? "a" : "w");
-        if (!logfile) {
-            perror(logfilename);
-            _exit(1);
-        }
-#if !defined(CONFIG_SOFTMMU)
-        /* must avoid mmap() usage of glibc by setting a buffer "by hand" */
-        {
-            static char logfile_buf[4096];
-            setvbuf(logfile, logfile_buf, _IOLBF, sizeof(logfile_buf));
-        }
-#elif defined(_WIN32)
-        /* Win32 doesn't support line-buffering, so use unbuffered output. */
-        setvbuf(logfile, NULL, _IONBF, 0);
-#else
-        setvbuf(logfile, NULL, _IOLBF, 0);
-#endif
-        log_append = 1;
-    }
-    if (!loglevel && logfile) {
-        fclose(logfile);
-        logfile = NULL;
-    }
-}
-
-void cpu_set_log_filename(const char *filename)
-{
-    logfilename = strdup(filename);
-    if (logfile) {
-        fclose(logfile);
-        logfile = NULL;
-    }
-    cpu_set_log(loglevel);
-}
-
 static void cpu_unlink_tb(CPUArchState *env)
 {
     /* FIXME: TB unchaining isn't SMP safe.  For now just ignore the
@@ -1779,78 +1732,6 @@ void cpu_exit(CPUArchState *env)
 {
     env->exit_request = 1;
     cpu_unlink_tb(env);
-}
-
-const CPULogItem cpu_log_items[] = {
-    { CPU_LOG_TB_OUT_ASM, "out_asm",
-      "show generated host assembly code for each compiled TB" },
-    { CPU_LOG_TB_IN_ASM, "in_asm",
-      "show target assembly code for each compiled TB" },
-    { CPU_LOG_TB_OP, "op",
-      "show micro ops for each compiled TB" },
-    { CPU_LOG_TB_OP_OPT, "op_opt",
-      "show micro ops "
-#ifdef TARGET_I386
-      "before eflags optimization and "
-#endif
-      "after liveness analysis" },
-    { CPU_LOG_INT, "int",
-      "show interrupts/exceptions in short format" },
-    { CPU_LOG_EXEC, "exec",
-      "show trace before each executed TB (lots of logs)" },
-    { CPU_LOG_TB_CPU, "cpu",
-      "show CPU state before block translation" },
-#ifdef TARGET_I386
-    { CPU_LOG_PCALL, "pcall",
-      "show protected mode far calls/returns/exceptions" },
-    { CPU_LOG_RESET, "cpu_reset",
-      "show CPU state before CPU resets" },
-#endif
-#ifdef DEBUG_IOPORT
-    { CPU_LOG_IOPORT, "ioport",
-      "show all i/o ports accesses" },
-#endif
-    { 0, NULL, NULL },
-};
-
-static int cmp1(const char *s1, int n, const char *s2)
-{
-    if (strlen(s2) != n)
-        return 0;
-    return memcmp(s1, s2, n) == 0;
-}
-
-/* takes a comma separated list of log masks. Return 0 if error. */
-int cpu_str_to_log_mask(const char *str)
-{
-    const CPULogItem *item;
-    int mask;
-    const char *p, *p1;
-
-    p = str;
-    mask = 0;
-    for(;;) {
-        p1 = strchr(p, ',');
-        if (!p1)
-            p1 = p + strlen(p);
-        if(cmp1(p,p1-p,"all")) {
-            for(item = cpu_log_items; item->mask != 0; item++) {
-                mask |= item->mask;
-            }
-        } else {
-            for(item = cpu_log_items; item->mask != 0; item++) {
-                if (cmp1(p, p1 - p, item->name))
-                    goto found;
-            }
-            return 0;
-        }
-    found:
-        mask |= item->mask;
-        if (*p1 != ',')
-            break;
-        p = p1 + 1;
-    }
-    return mask;
 }
 
 void cpu_abort(CPUArchState *env, const char *fmt, ...)
@@ -2600,8 +2481,8 @@ void qemu_ram_set_idstr(ram_addr_t addr, const char *name, DeviceState *dev)
     assert(new_block);
     assert(!new_block->idstr[0]);
 
-    if (dev && dev->parent_bus && dev->parent_bus->info->get_dev_path) {
-        char *id = dev->parent_bus->info->get_dev_path(dev);
+    if (dev) {
+        char *id = qdev_get_dev_path(dev);
         if (id) {
             snprintf(new_block->idstr, sizeof(new_block->idstr), "%s/", id);
             g_free(id);
