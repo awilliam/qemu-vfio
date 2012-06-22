@@ -60,9 +60,11 @@ typedef struct VFIOContainer {
 } VFIOContainer;
 
 typedef struct MSIXInfo {
-    uint8_t bar;
+    uint8_t table_bar;
+    uint8_t pba_bar;
     uint16_t entries;
-    uint32_t offset;
+    uint32_t table_offset;
+    uint32_t pba_offset;
     MemoryRegion region_lo;
     MemoryRegion region_hi;
     void *virtbase;

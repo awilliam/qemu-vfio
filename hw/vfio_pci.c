@@ -764,70 +764,126 @@ static void vfio_disable_interrupts(VFIODevice *vdev)
     }
 }
 
-static int vfio_setup_msi(VFIODevice *vdev)
+static int vfio_setup_msi(VFIODevice *vdev, int pos)
 {
-    int pos;
+    uint16_t ctrl;
+    bool msi_64bit, msi_maskbit;
+    int ret, entries;
 
-    if ((pos = vfio_find_cap_offset(&vdev->pdev, PCI_CAP_ID_MSI))) {
-        uint16_t ctrl;
-        bool msi_64bit, msi_maskbit;
-        int entries;
-
-        if (pread(vdev->fd, &ctrl, sizeof(ctrl),
-                  vdev->config_offset + pos + PCI_CAP_FLAGS) != sizeof(ctrl)) {
-            return -1;
-        }
-        ctrl = le16_to_cpu(ctrl);
-
-        msi_64bit = !!(ctrl & PCI_MSI_FLAGS_64BIT);
-        msi_maskbit = !!(ctrl & PCI_MSI_FLAGS_MASKBIT);
-        entries = 1 << ((ctrl & PCI_MSI_FLAGS_QMASK) >> 1);
-
-        DPRINTF("%04x:%02x:%02x.%x PCI MSI CAP @0x%x\n", vdev->host.seg,
-                vdev->host.bus, vdev->host.dev, vdev->host.func, pos);
-
-        if (msi_init(&vdev->pdev, pos, entries, msi_64bit, msi_maskbit) < 0) {
-            error_report("vfio: msi_init failed\n");
-            return -1;
-        }
-        vdev->msi_cap_size = 0xa + (msi_maskbit ? 0xa : 0) +
-                             (msi_64bit ? 0x4 : 0);
+    if (!msi_supported) {
+        return 0;
     }
 
-    if ((pos = vfio_find_cap_offset(&vdev->pdev, PCI_CAP_ID_MSIX))) {
-        uint16_t ctrl;
-        uint32_t table;
-
-        if (pread(vdev->fd, &ctrl, sizeof(ctrl),
-                  vdev->config_offset + pos + PCI_CAP_FLAGS) != sizeof(ctrl)) {
-            return -1;
-        }
-
-        if (pread(vdev->fd, &table, sizeof(table), vdev->config_offset +
-                  pos + PCI_MSIX_TABLE) != sizeof(table)) {
-            return -1;
-        }
-
-        ctrl = le16_to_cpu(ctrl);
-        table = le32_to_cpu(table);
-
-        vdev->msix = g_malloc0(sizeof(*(vdev->msix)));
-        vdev->msix->bar = table & PCI_MSIX_FLAGS_BIRMASK;
-        vdev->msix->offset = table & ~(MSIX_PAGE_SIZE - 1);
-        vdev->msix->entries = (ctrl & PCI_MSIX_FLAGS_QSIZE) + 1;
-
-        DPRINTF("%04x:%02x:%02x.%x PCI MSI-X CAP @0x%x, BAR %d, offset 0x%x\n",
-                vdev->host.seg, vdev->host.bus, vdev->host.dev,
-                vdev->host.func, pos, vdev->msix->bar,
-                table & ~PCI_MSIX_FLAGS_BIRMASK);
+    if (pread(vdev->fd, &ctrl, sizeof(ctrl),
+              vdev->config_offset + pos + PCI_CAP_FLAGS) != sizeof(ctrl)) {
+        return -1;
     }
+    ctrl = le16_to_cpu(ctrl);
+
+    msi_64bit = !!(ctrl & PCI_MSI_FLAGS_64BIT);
+    msi_maskbit = !!(ctrl & PCI_MSI_FLAGS_MASKBIT);
+    entries = 1 << ((ctrl & PCI_MSI_FLAGS_QMASK) >> 1);
+
+    DPRINTF("%04x:%02x:%02x.%x PCI MSI CAP @0x%x\n", vdev->host.seg,
+            vdev->host.bus, vdev->host.dev, vdev->host.func, pos);
+
+    ret = msi_init(&vdev->pdev, pos, entries, msi_64bit, msi_maskbit);
+    if (ret < 0) {
+        error_report("vfio: msi_init failed\n");
+        return ret;
+    }
+    vdev->msi_cap_size = 0xa + (msi_maskbit ? 0xa : 0) +
+                         (msi_64bit ? 0x4 : 0);
+
+    return 0;
+}
+
+/*
+ * We don't have any control over how pci_add_capability() inserts
+ * capabilities into the chain.  In order to setup MSI-X we need a
+ * MemoryRegion.  In order to setup the MemoryRegion and not attempt
+ * to mmap the MSI-X table area, which VFIO won't allow, we need to
+ * first look for where the MSI-X table lives.  So we unfortunately
+ * split MSI-X setup across two functions.
+ */
+static int vfio_early_setup_msix(VFIODevice *vdev)
+{
+    uint8_t pos;
+    uint16_t ctrl;
+    uint32_t table, pba;
+
+    pos = vfio_find_cap_offset(&vdev->pdev, PCI_CAP_ID_MSIX);
+    if (!pos) {
+        return 0;
+    }
+
+    if (pread(vdev->fd, &ctrl, sizeof(ctrl),
+              vdev->config_offset + pos + PCI_CAP_FLAGS) != sizeof(ctrl)) {
+        return -1;
+    }
+
+    if (pread(vdev->fd, &table, sizeof(table),
+              vdev->config_offset + pos + PCI_MSIX_TABLE) != sizeof(table)) {
+        return -1;
+    }
+
+    if (pread(vdev->fd, &pba, sizeof(pba),
+              vdev->config_offset + pos + PCI_MSIX_PBA) != sizeof(pba)) {
+        return -1;
+    }
+
+    ctrl = le16_to_cpu(ctrl);
+    table = le32_to_cpu(table);
+    pba = le32_to_cpu(pba);
+
+    vdev->msix = g_malloc0(sizeof(*(vdev->msix)));
+    vdev->msix->table_bar = table & PCI_MSIX_FLAGS_BIRMASK;
+    vdev->msix->table_offset = table & ~PCI_MSIX_FLAGS_BIRMASK;
+    vdev->msix->table_offset &= ~(MSIX_PAGE_SIZE - 1);
+    vdev->msix->pba_bar = pba & PCI_MSIX_FLAGS_BIRMASK;
+    vdev->msix->pba_offset = pba & ~PCI_MSIX_FLAGS_BIRMASK;
+    vdev->msix->pba_offset &= ~(MSIX_PAGE_SIZE - 1);
+    vdev->msix->entries = (ctrl & PCI_MSIX_FLAGS_QSIZE) + 1;
+
+    DPRINTF("%04x:%02x:%02x.%x "
+            "PCI MSI-X CAP @0x%x, BAR %d, offset 0x%x, entries %d\n",
+            vdev->host.seg, vdev->host.bus, vdev->host.dev, vdev->host.func,
+            pos, vdev->msix->table_bar, vdev->msix->table_offset,
+            vdev->msix->entries);
+
+    return 0;
+}
+
+static int vfio_setup_msix(VFIODevice *vdev, int pos)
+{
+    int ret;
+
+    if (!msi_supported) {
+        return 0;
+    }
+
+    assert(vdev->msix && vdev->resources[vdev->msix->table_bar].valid &&
+           vdev->resources[vdev->msix->pba_bar].valid);
+
+    ret = msix_init(&vdev->pdev, vdev->msix->entries,
+                    &vdev->resources[vdev->msix->table_bar].region,
+                    vdev->msix->table_bar, vdev->msix->table_offset,
+                    &vdev->resources[vdev->msix->pba_bar].region,
+                    vdev->msix->pba_bar, vdev->msix->pba_offset, pos);
+    if (ret < 0) {
+        error_report("vfio: msix_init failed\n");
+        return ret;
+    }
+
     return 0;
 }
 
 static void vfio_teardown_msi(VFIODevice *vdev)
 {
     msi_uninit(&vdev->pdev);
-    msix_uninit(&vdev->pdev, &vdev->resources[vdev->msix->bar].region);
+    msix_uninit(&vdev->pdev, &vdev->resources[vdev->msix->table_bar].region,
+                &vdev->resources[vdev->msix->pba_bar].region);
+    g_free(vdev->msix);
 }
 
 /*
@@ -839,17 +895,17 @@ static void vfio_unmap_region(VFIODevice *vdev, int bar)
 
     if (res->slow) {
         memory_region_destroy(&res->region);
-    } else if (vdev->msix && vdev->msix->bar == bar) {
+    } else if (vdev->msix && vdev->msix->table_bar == bar) {
         if (res->virtbase) {
             memory_region_del_subregion(&res->region, &vdev->msix->region_lo);
-            munmap(res->virtbase, vdev->msix->offset);
+            munmap(res->virtbase, vdev->msix->table_offset);
             memory_region_destroy(&vdev->msix->region_lo);
         }
 
         if (vdev->msix->virtbase) {
             memory_region_del_subregion(&res->region, &vdev->msix->region_hi);
             munmap(vdev->msix->virtbase,
-                   res->size - (vdev->msix->offset + MSIX_PAGE_SIZE));
+                   res->size - (vdev->msix->table_offset + MSIX_PAGE_SIZE));
             memory_region_destroy(&vdev->msix->region_hi);
         }
 
@@ -868,7 +924,7 @@ static void vfio_map_region(VFIODevice *vdev, int bar, char *name)
         goto slow;
     }
 
-    if (!vdev->msix || vdev->msix->bar != bar) {
+    if (!vdev->msix || vdev->msix->table_bar != bar) {
         res->virtbase = mmap(NULL, res->size, PROT_READ | PROT_WRITE,
                              MAP_SHARED, vdev->fd, res->offset);
         if (res->virtbase == MAP_FAILED) {
@@ -882,21 +938,22 @@ static void vfio_map_region(VFIODevice *vdev, int bar, char *name)
 
     memory_region_init(&res->region, name, res->size);
 
-    if (vdev->msix->offset) {
-        res->virtbase = mmap(NULL, vdev->msix->offset, PROT_READ | PROT_WRITE,
+    if (vdev->msix->table_offset) {
+        res->virtbase = mmap(NULL, vdev->msix->table_offset,
+                             PROT_READ | PROT_WRITE,
                              MAP_SHARED, vdev->fd, res->offset);
         if (res->virtbase == MAP_FAILED) {
             memory_region_destroy(&res->region);
             goto slow;
         }
 
-        memory_region_init_ram_ptr(&vdev->msix->region_lo,
-                                   "lo", vdev->msix->offset, res->virtbase);
+        memory_region_init_ram_ptr(&vdev->msix->region_lo, "lo",
+                                   vdev->msix->table_offset, res->virtbase);
         memory_region_add_subregion(&res->region, 0, &vdev->msix->region_lo);
     }
 
-    if (res->size > vdev->msix->offset + MSIX_PAGE_SIZE) {
-        off_t offset = vdev->msix->offset + MSIX_PAGE_SIZE;
+    if (res->size > vdev->msix->table_offset + MSIX_PAGE_SIZE) {
+        off_t offset = vdev->msix->table_offset + MSIX_PAGE_SIZE;
         size_t size = res->size - offset;
 
         vdev->msix->virtbase = mmap(NULL, size, PROT_READ | PROT_WRITE,
@@ -905,7 +962,7 @@ static void vfio_map_region(VFIODevice *vdev, int bar, char *name)
             if (res->virtbase) {
                 memory_region_del_subregion(&res->region,
                                             &vdev->msix->region_lo);
-                munmap(res->virtbase, vdev->msix->offset);
+                munmap(res->virtbase, vdev->msix->table_offset);
                 memory_region_destroy(&vdev->msix->region_lo);
             }
             memory_region_destroy(&res->region);
@@ -977,16 +1034,6 @@ static int vfio_map_resources(VFIODevice *vdev)
 
             vfio_map_region(vdev, i, name);
 
-            if (vdev->msix && vdev->msix->bar == i) {
-                if (msix_init(&vdev->pdev, vdev->msix->entries,
-                              &res->region, i, res->size) < 0) {
-                    vfio_unmap_region(vdev, i);
-
-                    error_report("vfio: msix_init failed\n");
-                    return -1;
-                }
-            }
-
             pci_register_bar(&vdev->pdev, i,
                              bar & ~PCI_BASE_ADDRESS_MEM_MASK, &res->region);
 
@@ -1027,6 +1074,86 @@ static void vfio_unmap_resources(VFIODevice *vdev)
 /*
  * General setup
  */
+static uint8_t vfio_std_cap_max_size(PCIDevice *pdev, uint8_t pos)
+{
+    uint8_t tmp, next = 0xff;
+
+    for (tmp = pdev->config[PCI_CAPABILITY_LIST]; tmp;
+         tmp = pdev->config[tmp + 1]) {
+        if (tmp > pos && tmp < next) {
+            next = tmp;
+        }
+    }
+
+    return next - pos;
+}
+
+static int vfio_add_std_cap(VFIODevice *vdev, uint8_t pos)
+{
+    PCIDevice *pdev = &vdev->pdev;
+    uint8_t cap_id, next, size;
+    int ret;
+
+    cap_id = pdev->config[pos];
+    next = pdev->config[pos + 1];
+
+    /*
+     * If it becomes important to configure capabilities to their actual
+     * size, use this as the default when it's something we don't recognize.
+     * Since qemu doesn't actually handle many of the config accesses,
+     * exact size doesn't seem worthwhile.
+     */
+    size =  vfio_std_cap_max_size(pdev, pos);
+
+    /*
+     * pci_add_capability always inserts the new capability at the head
+     * of the chain.  Therefore to end up with a chain that matches the
+     * physical device, we insert from the end by making this recursive.
+     * This is also why we pre-caclulate size above as cached config space
+     * will be changed as we unwind the stack.
+     */
+    if (next) {
+        ret = vfio_add_std_cap(vdev, next);
+        if (ret) {
+            return ret;
+        }
+    } else {
+        pdev->config[PCI_CAPABILITY_LIST] = 0; /* Begin the rebuild */
+    }
+
+    switch (cap_id) {
+    case PCI_CAP_ID_MSI:
+        ret = vfio_setup_msi(vdev, pos);
+        break;
+    case PCI_CAP_ID_MSIX:
+        ret = vfio_setup_msix(vdev, pos);
+        break;
+    default:
+        ret = pci_add_capability(pdev, cap_id, pos, size);
+    }
+
+    if (ret < 0) {
+        error_report("vfio: %04x:%02x:%02x.%x Error adding PCI capability "
+                     "0x%x[0x%x]@0x%x: %d\n", vdev->host.seg, vdev->host.bus,
+                     vdev->host.dev, vdev->host.func, cap_id, size, pos, ret);
+        return ret;
+    }
+
+    return 0;
+}
+
+static int vfio_add_capabilities(VFIODevice *vdev)
+{
+    PCIDevice *pdev = &vdev->pdev;
+
+    if (!(pdev->config[PCI_STATUS] & PCI_STATUS_CAP_LIST) ||
+        !pdev->config[PCI_CAPABILITY_LIST]) {
+        return 0; /* Nothing to add */
+    }
+
+    return vfio_add_std_cap(vdev, pdev->config[PCI_CAPABILITY_LIST]);
+}
+
 static int vfio_load_rom(VFIODevice *vdev)
 {
     uint64_t size = vdev->rom_size;
@@ -1475,20 +1602,27 @@ static int vfio_initfn(struct PCIDevice *pdev)
 
     vfio_load_rom(vdev);
 
-    if (msi_supported && vfio_setup_msi(vdev))
+    if (vfio_early_setup_msix(vdev)) {
         goto out;
+    }
 
-    if (vfio_map_resources(vdev))
-        goto out_disable_msi;
+    if (vfio_map_resources(vdev)) {
+        goto out_msi;
+    }
 
-    if (vfio_enable_intx(vdev))
-        goto out_unmap_resources;
+    if (vfio_add_capabilities(vdev)) {
+        goto out_resources;
+    }
+
+    if (vfio_enable_intx(vdev)) {
+        goto out_resources;
+    }
 
     return 0;
 
-out_unmap_resources:
+out_resources:
     vfio_unmap_resources(vdev);
-out_disable_msi:
+out_msi:
     vfio_teardown_msi(vdev);
 out:
     vfio_put_device(vdev);
@@ -1502,8 +1636,8 @@ static int vfio_exitfn(struct PCIDevice *pdev)
     VFIOGroup *group = vdev->group;
 
     vfio_disable_interrupts(vdev);
-    vfio_teardown_msi(vdev);
     vfio_unmap_resources(vdev);
+    vfio_teardown_msi(vdev);
     vfio_put_device(vdev);
     vfio_put_group(group);
     return 0;
