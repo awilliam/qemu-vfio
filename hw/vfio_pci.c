@@ -152,6 +152,21 @@ static int print_hostaddr(DeviceState *qdev, Property *prop,
                     ptr->seg, ptr->bus, ptr->dev, ptr->func);
 }
 
+static void vfio_disable_irqindex(VFIODevice *vdev, int index)
+{
+    struct vfio_irq_set irq_set = {
+        .argsz = sizeof(irq_set),
+        .flags = VFIO_IRQ_SET_DATA_NONE | VFIO_IRQ_SET_ACTION_TRIGGER,
+        .index = index,
+        .start = 0,
+        .count = 0,
+    };
+
+    ioctl(vdev->fd, VFIO_DEVICE_SET_IRQS, &irq_set);
+
+    vdev->interrupt = INT_NONE;
+}
+
 /*
  * INTx
  */
@@ -285,15 +300,8 @@ static int vfio_enable_intx(VFIODevice *vdev)
 static void vfio_disable_intx(VFIODevice *vdev)
 {
     int fd;
-    struct vfio_irq_set irq_set = {
-        .argsz = sizeof(irq_set),
-        .flags = VFIO_IRQ_SET_DATA_NONE | VFIO_IRQ_SET_ACTION_TRIGGER,
-        .index = VFIO_PCI_INTX_IRQ_INDEX,
-        .start = 0,
-        .count = 0,
-    };
 
-    ioctl(vdev->fd, VFIO_DEVICE_SET_IRQS, &irq_set);
+    vfio_disable_irqindex(vdev, VFIO_PCI_INTX_IRQ_INDEX);
 
     pci_remove_irq_update_notifier(&vdev->intx.update_irq);
     ioapic_remove_gsi_eoi_notifier(&vdev->intx.eoi, vdev->intx.irq);
@@ -332,24 +340,15 @@ static void vfio_msi_interrupt(void *opaque)
     }
 }
 
-static void vfio_enable_msi(VFIODevice *vdev, bool msix)
+static int vfio_enable_vectors(VFIODevice *vdev, bool msix)
 {
     struct vfio_irq_set *irq_set;
     int ret, i, argsz;
     int32_t *fds;
 
-    vfio_disable_interrupts(vdev);
-
-    /* TODO: MSI-X - look in the vector table to see what to enable */
-    /*             - watch vector table for (un)masks */
-    vdev->nr_vectors = msix ? vdev->pdev.msix_entries_nr :
-                              msi_nr_vectors_allocated(&vdev->pdev);
-retry:
-    vdev->msi_vectors = g_malloc(vdev->nr_vectors * sizeof(MSIVector));
-
     argsz = sizeof(*irq_set) + (vdev->nr_vectors * sizeof(*fds));
 
-    irq_set = g_malloc(argsz);
+    irq_set = g_malloc0(argsz);
     irq_set->argsz = argsz;
     irq_set->flags = VFIO_IRQ_SET_DATA_EVENTFD | VFIO_IRQ_SET_ACTION_TRIGGER;
     irq_set->index = msix ? VFIO_PCI_MSIX_IRQ_INDEX : VFIO_PCI_MSI_IRQ_INDEX;
@@ -358,46 +357,223 @@ retry:
     fds = (int32_t *)&irq_set->data;
 
     for (i = 0; i < vdev->nr_vectors; i++) {
+        if (!vdev->msi_vectors[i].use) {
+            fds[i] = -1;
+            continue;
+        }
+
+        fds[i] = event_notifier_get_fd(&vdev->msi_vectors[i].interrupt);
+    }
+
+    ret = ioctl(vdev->fd, VFIO_DEVICE_SET_IRQS, irq_set);
+
+    if (ret) {
+        g_free(irq_set);
+        return ret;
+    }
+
+    vdev->interrupt = msix ? INT_MSIX : INT_MSI;
+
+    return 0;
+}
+
+static int vfio_msix_vector_use(PCIDevice *pdev,
+                                unsigned int vector, MSIMessage msg)
+{
+    VFIODevice *vdev = DO_UPCAST(VFIODevice, pdev, pdev);
+    int ret, fd;
+
+    DPRINTF("%s(%04x:%02x:%02x.%x) vector %d used\n", __FUNCTION__,
+            vdev->host.seg, vdev->host.bus, vdev->host.dev,
+            vdev->host.func, vector);
+
+    if (vdev->interrupt != INT_MSIX) {
+        vfio_disable_interrupts(vdev);
+    }
+
+    if (!vdev->msi_vectors) {
+        vdev->msi_vectors = g_malloc0(vdev->msix->entries * sizeof(MSIVector));
+    }
+
+    vdev->msi_vectors[vector].vdev = vdev;
+    vdev->msi_vectors[vector].vector = vector;
+    vdev->msi_vectors[vector].use = true;
+
+    msix_vector_use(pdev, vector);
+
+    if (event_notifier_init(&vdev->msi_vectors[vector].interrupt, 0)) {
+        error_report("vfio: Error: event_notifier_init failed\n");
+    }
+
+    fd = event_notifier_get_fd(&vdev->msi_vectors[vector].interrupt);
+
+    vdev->msi_vectors[vector].virq = kvm_irqchip_add_msi_route(kvm_state, msg);
+    if (vdev->msi_vectors[vector].virq < 0 || 
+        kvm_irqchip_add_irqfd(kvm_state, fd,
+                              vdev->msi_vectors[vector].virq) < 0) {
+        qemu_set_fd_handler(fd, vfio_msi_interrupt, NULL,
+                            &vdev->msi_vectors[vector]);
+    }
+
+    if (vdev->nr_vectors < vector + 1) {
+        int i;
+
+        vfio_disable_irqindex(vdev, VFIO_PCI_MSIX_IRQ_INDEX);
+        vdev->nr_vectors = vector + 1;
+        ret = vfio_enable_vectors(vdev, true);
+        if (ret) {
+            error_report("vfio: failed to enable vectors, %d\n", ret);
+        }
+
+        /* We don't know if we've missed interrupts in the interim... */
+        for (i = 0; i < vdev->msix->entries; i++) {
+            if (vdev->msi_vectors[i].use) {
+                msix_notify(&vdev->pdev, i);
+            }
+        }
+    } else {
+        struct vfio_irq_set_fd irq_set_fd = {
+            .irq_set = {
+                .argsz = sizeof(irq_set_fd),
+                .flags = VFIO_IRQ_SET_DATA_EVENTFD |
+                         VFIO_IRQ_SET_ACTION_TRIGGER,
+                .index = VFIO_PCI_MSIX_IRQ_INDEX,
+                .start = vector,
+                .count = 1,
+            },
+            .fd = fd,
+        };
+        ret = ioctl(vdev->fd, VFIO_DEVICE_SET_IRQS, &irq_set_fd);
+        if (ret) {
+            error_report("vfio: failed to modify vector, %d\n", ret);
+        }
+        msix_notify(&vdev->pdev, vector);
+    }
+
+    return 0;
+}
+
+static void vfio_msix_vector_release(PCIDevice *pdev, unsigned int vector)
+{
+    VFIODevice *vdev = DO_UPCAST(VFIODevice, pdev, pdev);
+    struct vfio_irq_set_fd irq_set_fd = {
+        .irq_set = {
+            .argsz = sizeof(irq_set_fd),
+            .flags = VFIO_IRQ_SET_DATA_EVENTFD |
+                     VFIO_IRQ_SET_ACTION_TRIGGER,
+            .index = VFIO_PCI_MSIX_IRQ_INDEX,
+            .start = vector,
+            .count = 1,
+        },
+        .fd = -1,
+    };
+    int fd;
+
+    DPRINTF("%s(%04x:%02x:%02x.%x) vector %d released\n", __FUNCTION__,
+            vdev->host.seg, vdev->host.bus, vdev->host.dev,
+            vdev->host.func, vector);
+
+    /*
+     * XXX What's the right thing to do here?  This turns off the interrupt
+     * completely, but do we really just want to switch the interrupt to
+     * bouncing through userspace and let msix.c drop it?  Not clear.
+     */
+    msix_vector_unuse(pdev, vector);
+    ioctl(vdev->fd, VFIO_DEVICE_SET_IRQS, &irq_set_fd);
+
+    fd = event_notifier_get_fd(&vdev->msi_vectors[vector].interrupt);
+
+    if (vdev->msi_vectors[vector].virq < 0) {
+        qemu_set_fd_handler(fd, NULL, NULL, NULL);
+    } else {
+        kvm_irqchip_remove_irqfd(kvm_state, fd, vdev->msi_vectors[vector].virq);
+        kvm_irqchip_release_virq(kvm_state, vdev->msi_vectors[vector].virq);
+        vdev->msi_vectors[vector].virq = -1;
+    }
+
+    event_notifier_cleanup(&vdev->msi_vectors[vector].interrupt);
+    vdev->msi_vectors[vector].use = false;
+}
+
+/* FIXME This should not be here!  Hack until msi.c gives us an API */
+static MSIMessage msi_get_msg(PCIDevice *pdev, unsigned int vector)
+{
+    uint16_t flags = pci_get_word(pdev->config + pdev->msi_cap + PCI_MSI_FLAGS);
+    bool msi64bit = flags & PCI_MSI_FLAGS_64BIT;
+    MSIMessage msg;
+
+    if (msi64bit) {
+        msg.address = pci_get_quad(pdev->config +
+                                   pdev->msi_cap + PCI_MSI_ADDRESS_LO);
+    } else {
+        msg.address = pci_get_long(pdev->config +
+                                   pdev->msi_cap + PCI_MSI_ADDRESS_LO);
+    }
+
+    msg.data = pci_get_word(pdev->config + pdev->msi_cap +
+                            (msi64bit ? PCI_MSI_DATA_64 : PCI_MSI_DATA_32));
+    msg.data += vector;
+
+    return msg;
+}
+
+static void vfio_enable_msi(VFIODevice *vdev)
+{
+    int ret, i;
+
+    vfio_disable_interrupts(vdev);
+
+    vdev->nr_vectors = msi_nr_vectors_allocated(&vdev->pdev);
+retry:
+    vdev->msi_vectors = g_malloc0(vdev->nr_vectors * sizeof(MSIVector));
+
+    for (i = 0; i < vdev->nr_vectors; i++) {
+        MSIMessage msg;
         int fd;
 
         vdev->msi_vectors[i].vdev = vdev;
         vdev->msi_vectors[i].vector = i;
+        vdev->msi_vectors[i].use = true;
 
         if (event_notifier_init(&vdev->msi_vectors[i].interrupt, 0)) {
             error_report("vfio: Error: event_notifier_init failed\n");
         }
 
         fd = event_notifier_get_fd(&vdev->msi_vectors[i].interrupt);
-        qemu_set_fd_handler(fd, vfio_msi_interrupt, NULL,
-                            &vdev->msi_vectors[i]);
 
-        fds[i] = fd;
-
-        if (msix && msix_vector_use(&vdev->pdev, i) < 0) {
-            error_report("vfio: Error msix_vector_use\n");
+        msg = msi_get_msg(&vdev->pdev, i);
+        vdev->msi_vectors[i].virq = kvm_irqchip_add_msi_route(kvm_state, msg);
+        if (vdev->msi_vectors[i].virq < 0 || 
+            kvm_irqchip_add_irqfd(kvm_state, fd,
+                                  vdev->msi_vectors[i].virq) < 0) {
+            qemu_set_fd_handler(fd, vfio_msi_interrupt, NULL,
+                                &vdev->msi_vectors[i]);
         }
     }
-
-    ret = ioctl(vdev->fd, VFIO_DEVICE_SET_IRQS, irq_set);
+    
+    ret = vfio_enable_vectors(vdev, false);
     if (ret) {
         if (ret < 0) {
-            error_report("vfio: Error: Failed to setup MSI/X fds: %s\n",
+            error_report("vfio: Error: Failed to setup MSI fds: %s\n",
                          strerror(errno));
         } else if (ret != vdev->nr_vectors) {
-            error_report("vfio: Error: Failed to enable %d MSI%s "
-                         "vectors, retry with %d\n", irq_set->count,
-                         msix ? "x" : "", ret);
+            error_report("vfio: Error: Failed to enable %d "
+                         "MSI vectors, retry with %d\n", vdev->nr_vectors, ret);
         }
 
         for (i = 0; i < vdev->nr_vectors; i++) {
-            if (msix) {
-                msix_vector_unuse(&vdev->pdev, i);
+            int fd = event_notifier_get_fd(&vdev->msi_vectors[i].interrupt);
+            if (vdev->msi_vectors[i].virq >= 0) {
+                kvm_irqchip_remove_irqfd(kvm_state, fd,
+                                         vdev->msi_vectors[i].virq);
+                kvm_irqchip_release_virq(kvm_state, vdev->msi_vectors[i].virq);
+                vdev->msi_vectors[i].virq = -1;
+            } else {
+                qemu_set_fd_handler(fd, NULL, NULL, NULL);
             }
-            qemu_set_fd_handler(fds[i], NULL, NULL, NULL);
             event_notifier_cleanup(&vdev->msi_vectors[i].interrupt);
         }
 
-        g_free(irq_set);
         g_free(vdev->msi_vectors);
 
         if (ret > 0 && ret != vdev->nr_vectors) {
@@ -409,45 +585,48 @@ retry:
         return;
     }
 
-    vdev->interrupt = msix ? INT_MSIX : INT_MSI;
-
-    g_free(irq_set);
-
-    DPRINTF("%s(%04x:%02x:%02x.%x) Enabled %d vectors\n", __FUNCTION__,
+    DPRINTF("%s(%04x:%02x:%02x.%x) Enabled %d MSI vectors\n", __FUNCTION__,
             vdev->host.seg, vdev->host.bus, vdev->host.dev,
             vdev->host.func, vdev->nr_vectors);
 }
 
-static void vfio_disable_msi(VFIODevice *vdev, bool msix)
+static void vfio_disable_msi_x(VFIODevice *vdev, bool msix)
 {
-    struct vfio_irq_set irq_set = {
-        .argsz = sizeof(irq_set),
-        .flags = VFIO_IRQ_SET_DATA_NONE | VFIO_IRQ_SET_ACTION_TRIGGER,
-        .index = msix ? VFIO_PCI_MSIX_IRQ_INDEX : VFIO_PCI_MSI_IRQ_INDEX,
-        .start = 0,
-        .count = 0,
-    };
     int i;
 
-    ioctl(vdev->fd, VFIO_DEVICE_SET_IRQS, &irq_set);
+    vfio_disable_irqindex(vdev, msix ? VFIO_PCI_MSIX_IRQ_INDEX :
+                                       VFIO_PCI_MSI_IRQ_INDEX);
 
     for (i = 0; i < vdev->nr_vectors; i++) {
-        int fd = event_notifier_get_fd(&vdev->msi_vectors[i].interrupt);
+        int fd;
+
+        if (!vdev->msi_vectors[i].use) {
+            continue;
+        }
+
+        fd = event_notifier_get_fd(&vdev->msi_vectors[i].interrupt);
+
+        if (vdev->msi_vectors[i].virq >= 0) {
+            kvm_irqchip_remove_irqfd(kvm_state, fd, vdev->msi_vectors[i].virq);
+            kvm_irqchip_release_virq(kvm_state, vdev->msi_vectors[i].virq);
+            vdev->msi_vectors[i].virq = -1;
+        } else {
+            qemu_set_fd_handler(fd, NULL, NULL, NULL);
+        }
 
         if (msix) {
             msix_vector_unuse(&vdev->pdev, i);
         }
 
-        qemu_set_fd_handler(fd, NULL, NULL, NULL);
         event_notifier_cleanup(&vdev->msi_vectors[i].interrupt);
     }
 
     g_free(vdev->msi_vectors);
+    vdev->msi_vectors = NULL;
     vdev->nr_vectors = 0;
-    vdev->interrupt = INT_NONE;
 
-    DPRINTF("%s(%04x:%02x:%02x.%x)\n", __FUNCTION__, vdev->host.seg,
-            vdev->host.bus, vdev->host.dev, vdev->host.func);
+    DPRINTF("%s(%04x:%02x:%02x.%x, msi%s)\n", __FUNCTION__, vdev->host.seg,
+            vdev->host.bus, vdev->host.dev, vdev->host.func, msix ? "x" : "");
 
     vfio_enable_intx(vdev);
 }
@@ -606,9 +785,9 @@ static void vfio_pci_write_config(PCIDevice *pdev, uint32_t addr,
         is_enabled = msi_enabled(pdev);
 
         if (!was_enabled && is_enabled) {
-            vfio_enable_msi(vdev, false);
+            vfio_enable_msi(vdev);
         } else if (was_enabled && !is_enabled) {
-            vfio_disable_msi(vdev, false);
+            vfio_disable_msi_x(vdev, false);
         }
     }
 
@@ -622,9 +801,9 @@ static void vfio_pci_write_config(PCIDevice *pdev, uint32_t addr,
         is_enabled = msix_enabled(pdev);
 
         if (!was_enabled && is_enabled) {
-            vfio_enable_msi(vdev, true);
+            /* vfio_msix_vector_use handles this automatically */
         } else if (was_enabled && !is_enabled) {
-            vfio_disable_msi(vdev, true);
+            vfio_disable_msi_x(vdev, true);
         }
     }
 }
@@ -755,10 +934,10 @@ static void vfio_disable_interrupts(VFIODevice *vdev)
         vfio_disable_intx(vdev);
         break;
     case INT_MSI:
-        vfio_disable_msi(vdev, false);
+        vfio_disable_msi_x(vdev, false);
         break;
     case INT_MSIX:
-        vfio_disable_msi(vdev, true);
+        vfio_disable_msi_x(vdev, true);
     }
 }
 
@@ -798,10 +977,10 @@ static int vfio_setup_msi(VFIODevice *vdev, int pos)
 /*
  * We don't have any control over how pci_add_capability() inserts
  * capabilities into the chain.  In order to setup MSI-X we need a
- * MemoryRegion.  In order to setup the MemoryRegion and not attempt
- * to mmap the MSI-X table area, which VFIO won't allow, we need to
- * first look for where the MSI-X table lives.  So we unfortunately
- * split MSI-X setup across two functions.
+ * MemoryRegion for the BAR.  In order to setup the BAR and not
+ * attempt to mmap the MSI-X table area, which VFIO won't allow, we
+ * need to first look for where the MSI-X table lives.  So we
+ * unfortunately split MSI-X setup across two functions.
  */
 static int vfio_early_setup_msix(VFIODevice *vdev)
 {
@@ -866,6 +1045,15 @@ static int vfio_setup_msix(VFIODevice *vdev, int pos)
         error_report("vfio: msix_init failed\n");
         return ret;
     }
+ 
+    ret = msix_set_vector_notifiers(&vdev->pdev, vfio_msix_vector_use,
+                                    vfio_msix_vector_release);
+    if (ret) {
+        error_report("vfio: msix_set_vector_notifiers failed %d\n", ret);
+        msix_uninit(&vdev->pdev, &vdev->bars[vdev->msix->table_bar].mem,
+                    &vdev->bars[vdev->msix->pba_bar].mem);
+        return ret;
+    }
 
     return 0;
 }
@@ -873,6 +1061,11 @@ static int vfio_setup_msix(VFIODevice *vdev, int pos)
 static void vfio_teardown_msi(VFIODevice *vdev)
 {
     msi_uninit(&vdev->pdev);
+    /* FIXME: Why can't unset just silently do nothing?? */
+    if (vdev->pdev.msix_vector_use_notifier &&
+        vdev->pdev.msix_vector_release_notifier) {
+        msix_unset_vector_notifiers(&vdev->pdev);
+    }
     msix_uninit(&vdev->pdev, &vdev->bars[vdev->msix->table_bar].mem,
                 &vdev->bars[vdev->msix->pba_bar].mem);
     g_free(vdev->msix);

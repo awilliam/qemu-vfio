@@ -39,6 +39,8 @@ typedef struct MSIVector {
     EventNotifier interrupt;
     struct VFIODevice *vdev;
     int vector;
+    int virq;
+    bool use;
 } MSIVector;
 
 enum {
