@@ -26,9 +26,11 @@ typedef struct VFIOBAR {
 
 typedef struct INTx {
     bool pending;
+    bool kvm_accel;
     uint8_t pin;
     int irq;
     EventNotifier interrupt;
+    EventNotifier unmask;
     Notifier eoi;
     Notifier update_irq;
 } INTx;

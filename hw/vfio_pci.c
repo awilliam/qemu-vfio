@@ -183,6 +183,19 @@ static inline void vfio_unmask_intx(VFIODevice *vdev)
     ioctl(vdev->fd, VFIO_DEVICE_SET_IRQS, &irq_set);
 }
 
+static inline void vfio_mask_intx(VFIODevice *vdev)
+{
+    struct vfio_irq_set irq_set = {
+        .argsz = sizeof(irq_set),
+        .flags = VFIO_IRQ_SET_DATA_NONE | VFIO_IRQ_SET_ACTION_MASK,
+        .index = VFIO_PCI_INTX_IRQ_INDEX,
+        .start = 0,
+        .count = 1,
+    };
+
+    ioctl(vdev->fd, VFIO_DEVICE_SET_IRQS, &irq_set);
+}
+
 static void vfio_intx_interrupt(void *opaque)
 {
     VFIODevice *vdev = opaque;
@@ -215,6 +228,130 @@ static void vfio_eoi(Notifier *notify, void *data)
     vfio_unmask_intx(vdev);
 }
 
+struct vfio_irq_set_fd {
+    struct vfio_irq_set irq_set;
+    int32_t fd;
+} QEMU_PACKED;
+
+static void vfio_enable_intx_kvm(VFIODevice *vdev)
+{
+#ifdef CONFIG_KVM
+    struct vfio_irq_set_fd irq_set_fd = {
+	.irq_set = {
+            .argsz = sizeof(irq_set_fd),
+            .flags = VFIO_IRQ_SET_DATA_EVENTFD | VFIO_IRQ_SET_ACTION_UNMASK,
+            .index = VFIO_PCI_INTX_IRQ_INDEX,
+            .start = 0,
+            .count = 1,
+        },
+    };
+    struct kvm_irqfd irqfd = {
+        .gsi = vdev->intx.irq,
+        .flags = KVM_IRQFD_FLAG_LEVEL_EOI,
+    };
+
+    if (vdev->intx.kvm_accel || !kvm_irqchip_in_kernel() ||
+        !kvm_check_extension(kvm_state, KVM_CAP_IRQFD_LEVEL_EOI)) {
+        return;
+    }
+
+    irqfd.fd = event_notifier_get_fd(&vdev->intx.interrupt);
+
+    qemu_set_fd_handler(irqfd.fd, NULL, NULL, vdev);
+    ioapic_remove_gsi_eoi_notifier(&vdev->intx.eoi, vdev->intx.irq);
+    vfio_mask_intx(vdev);
+    vdev->intx.pending = false;
+    qemu_set_irq(vdev->pdev.irq[vdev->intx.pin], 0);
+
+    if (event_notifier_init(&vdev->intx.unmask, 0)) {
+        error_report("vfio: Error: event_notifier_init failed eoi\n");
+        goto fail;
+    }
+
+    irq_set_fd.fd = irqfd.fd2 = event_notifier_get_fd(&vdev->intx.unmask);
+
+    if (kvm_vm_ioctl(kvm_state, KVM_IRQFD, &irqfd)) {
+        error_report("vfio: Error: Failed to setup INTx irqfd: %s\n",
+                     strerror(errno));
+        goto fail;
+    }
+
+    if (ioctl(vdev->fd, VFIO_DEVICE_SET_IRQS, &irq_set_fd)) {
+        irqfd.flags |= KVM_IRQFD_FLAG_DEASSIGN;
+        kvm_vm_ioctl(kvm_state, KVM_IRQFD, &irqfd);
+        error_report("vfio: Error: Failed to setup INTx unmask fd: %s\n",
+                     strerror(errno));
+        goto fail;
+    }
+
+    vfio_unmask_intx(vdev);
+    
+    vdev->intx.kvm_accel = true;
+
+    DPRINTF("%s(%04x:%02x:%02x.%x) KVM INTx accel enabled\n", __FUNCTION__,
+            vdev->host.seg, vdev->host.bus, vdev->host.dev, vdev->host.func);
+
+    return;
+
+fail:
+    ioapic_add_gsi_eoi_notifier(&vdev->intx.eoi, vdev->intx.irq);
+    qemu_set_fd_handler(irqfd.fd, vfio_intx_interrupt, NULL, vdev);
+    vfio_unmask_intx(vdev);
+#endif
+}
+
+static void vfio_disable_intx_kvm(VFIODevice *vdev)
+{
+#ifdef CONFIG_KVM
+    struct vfio_irq_set_fd irq_set_fd = {
+	.irq_set = {
+            .argsz = sizeof(irq_set_fd),
+            .flags = VFIO_IRQ_SET_DATA_EVENTFD | VFIO_IRQ_SET_ACTION_UNMASK,
+            .index = VFIO_PCI_INTX_IRQ_INDEX,
+            .start = 0,
+            .count = 1,
+        },
+        .fd = -1,
+    };
+    struct kvm_irqfd irqfd = {
+        .gsi = vdev->intx.irq,
+        .flags = KVM_IRQFD_FLAG_LEVEL_EOI | KVM_IRQFD_FLAG_DEASSIGN,
+    };
+
+    if (!vdev->intx.kvm_accel) {
+        return;
+    }
+
+    vfio_mask_intx(vdev);
+    vdev->intx.pending = false;
+    qemu_set_irq(vdev->pdev.irq[vdev->intx.pin], 0);
+
+    irqfd.fd = event_notifier_get_fd(&vdev->intx.interrupt);
+    irqfd.fd2 = event_notifier_get_fd(&vdev->intx.unmask);
+
+    if (ioctl(vdev->fd, VFIO_DEVICE_SET_IRQS, &irq_set_fd)) {
+        error_report("vfio: Error: Failed to disable INTx unmask fd: %s\n",
+                     strerror(errno));
+    }
+
+    if (kvm_vm_ioctl(kvm_state, KVM_IRQFD, &irqfd)) {
+        error_report("vfio: Error: Failed to disable INTx irqfd: %s\n",
+                     strerror(errno));
+    }
+
+    event_notifier_cleanup(&vdev->intx.unmask);
+
+    ioapic_add_gsi_eoi_notifier(&vdev->intx.eoi, vdev->intx.irq);
+    qemu_set_fd_handler(irqfd.fd, vfio_intx_interrupt, NULL, vdev);
+    vfio_unmask_intx(vdev);
+
+    vdev->intx.kvm_accel = false;
+
+    DPRINTF("%s(%04x:%02x:%02x.%x) KVM INTx accel disabled\n", __FUNCTION__,
+            vdev->host.seg, vdev->host.bus, vdev->host.dev, vdev->host.func);
+#endif
+}
+
 static void vfio_update_irq(Notifier *notify, void *data)
 {
     VFIODevice *vdev = container_of(notify, VFIODevice, intx.update_irq);
@@ -228,6 +365,7 @@ static void vfio_update_irq(Notifier *notify, void *data)
             vdev->host.seg, vdev->host.bus, vdev->host.dev,
             vdev->host.func, vdev->intx.irq, irq);
 
+    vfio_disable_intx_kvm(vdev);
     ioapic_remove_gsi_eoi_notifier(&vdev->intx.eoi, vdev->intx.irq);
 
     vdev->intx.irq = irq;
@@ -238,15 +376,11 @@ static void vfio_update_irq(Notifier *notify, void *data)
     }
 
     ioapic_add_gsi_eoi_notifier(&vdev->intx.eoi, vdev->intx.irq);
+    vfio_enable_intx_kvm(vdev);
 
     /* Re-enable the interrupt in cased we missed an EOI */
     vfio_eoi(&vdev->intx.eoi, NULL);
 }
-
-struct vfio_irq_set_fd {
-    struct vfio_irq_set irq_set;
-    int32_t fd;
-} QEMU_PACKED;
 
 static int vfio_enable_intx(VFIODevice *vdev)
 {
@@ -289,6 +423,8 @@ static int vfio_enable_intx(VFIODevice *vdev)
         return -1;
     }
 
+    vfio_enable_intx_kvm(vdev);
+
     vdev->interrupt = INT_INTx;
 
     DPRINTF("%s(%04x:%02x:%02x.%x)\n", __FUNCTION__, vdev->host.seg,
@@ -301,6 +437,7 @@ static void vfio_disable_intx(VFIODevice *vdev)
 {
     int fd;
 
+    vfio_disable_intx_kvm(vdev);
     vfio_disable_irqindex(vdev, VFIO_PCI_INTX_IRQ_INDEX);
 
     pci_remove_irq_update_notifier(&vdev->intx.update_irq);
@@ -1217,7 +1354,7 @@ static int vfio_map_bars(VFIODevice *vdev)
 
         bar_val = le32_to_cpu(bar_val);
         bar_type = bar_val & (bar_val & PCI_BASE_ADDRESS_SPACE_IO ?
-                   ~PCI_BASE_ADDRESS_IO_MASK : PCI_BASE_ADDRESS_MEM_MASK);
+                   ~PCI_BASE_ADDRESS_IO_MASK : ~PCI_BASE_ADDRESS_MEM_MASK);
 
         vfio_map_bar(vdev, i, bar_type);
 
@@ -1694,9 +1831,6 @@ static int vfio_initfn(struct PCIDevice *pdev)
     struct stat st;
     int groupid;
     int ret;
-
-    sprintf(pdev->name, "vfio-%04x:%02x:%02x.%01x",
-            vdev->host.seg, vdev->host.bus, vdev->host.dev, vdev->host.func);
 
     /* Check that the host device exists */
     sprintf(path, "/sys/bus/pci/devices/%04x:%02x:%02x.%01x/",
