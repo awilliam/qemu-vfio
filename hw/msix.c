@@ -405,13 +405,6 @@ int msix_enabled(PCIDevice *dev)
          MSIX_ENABLE_MASK);
 }
 
-/* Size of bar where MSI-X table resides, or 0 if MSI-X not supported. */
-uint32_t msix_bar_size(PCIDevice *dev)
-{
-    return (dev->cap_present & QEMU_PCI_CAP_MSIX) ?
-        dev->msix_bar_size : 0;
-}
-
 /* Send an MSI-X message */
 void msix_notify(PCIDevice *dev, unsigned vector)
 {
