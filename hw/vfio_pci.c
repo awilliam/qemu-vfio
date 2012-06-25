@@ -544,7 +544,12 @@ static int vfio_msix_vector_use(PCIDevice *pdev,
 
     fd = event_notifier_get_fd(&vdev->msi_vectors[vector].interrupt);
 
-    vdev->msi_vectors[vector].virq = kvm_irqchip_add_msi_route(kvm_state, msg);
+    /*
+     * Ugh, why is kvm_irqchip_add_msi_route an abort() when IRQ_ROUTING
+     * is not defined?!  Makes it ugly to have optional acceleration.
+     */
+    vdev->msi_vectors[vector].virq = kvm_irqchip_in_kernel() ?
+                                kvm_irqchip_add_msi_route(kvm_state, msg) : -1;
     if (vdev->msi_vectors[vector].virq < 0 || 
         kvm_irqchip_add_irqfd(kvm_state, fd,
                               vdev->msi_vectors[vector].virq) < 0) {
@@ -692,7 +697,12 @@ retry:
         fd = event_notifier_get_fd(&vdev->msi_vectors[i].interrupt);
 
         msg = msi_get_msg(&vdev->pdev, i);
-        vdev->msi_vectors[i].virq = kvm_irqchip_add_msi_route(kvm_state, msg);
+        /*
+         * Ugh, why is kvm_irqchip_add_msi_route an abort() when IRQ_ROUTING
+         * is not defined?!  Makes it ugly to have optional acceleration.
+         */
+        vdev->msi_vectors[i].virq = kvm_irqchip_in_kernel() ?
+                                kvm_irqchip_add_msi_route(kvm_state, msg) : -1;
         if (vdev->msi_vectors[i].virq < 0 || 
             kvm_irqchip_add_irqfd(kvm_state, fd,
                                   vdev->msi_vectors[i].virq) < 0) {
