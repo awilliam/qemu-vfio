@@ -247,15 +247,19 @@ static void vfio_enable_intx_kvm(VFIODevice *vdev)
     };
     struct kvm_irqfd irqfd = {
         .gsi = vdev->intx.irq,
-        .flags = KVM_IRQFD_FLAG_LEVEL_EOI,
+        .flags = KVM_IRQFD_FLAG_LEVEL,
+    };
+    struct kvm_eoifd eoifd = {
+        .flags = KVM_EOIFD_FLAG_LEVEL_IRQFD,
     };
 
     if (vdev->intx.kvm_accel || !kvm_irqchip_in_kernel() ||
-        !kvm_check_extension(kvm_state, KVM_CAP_IRQFD_LEVEL_EOI)) {
+        !kvm_check_extension(kvm_state, KVM_CAP_IRQFD_LEVEL) ||
+        !kvm_check_extension(kvm_state, KVM_CAP_EOIFD_LEVEL_IRQFD)) {
         return;
     }
 
-    irqfd.fd = event_notifier_get_fd(&vdev->intx.interrupt);
+    eoifd.irqfd = irqfd.fd = event_notifier_get_fd(&vdev->intx.interrupt);
 
     qemu_set_fd_handler(irqfd.fd, NULL, NULL, vdev);
     ioapic_remove_gsi_eoi_notifier(&vdev->intx.eoi, vdev->intx.irq);
@@ -268,7 +272,7 @@ static void vfio_enable_intx_kvm(VFIODevice *vdev)
         goto fail;
     }
 
-    irq_set_fd.fd = irqfd.fd2 = event_notifier_get_fd(&vdev->intx.unmask);
+    eoifd.fd = irq_set_fd.fd = event_notifier_get_fd(&vdev->intx.unmask);
 
     if (kvm_vm_ioctl(kvm_state, KVM_IRQFD, &irqfd)) {
         error_report("vfio: Error: Failed to setup INTx irqfd: %s\n",
@@ -276,9 +280,19 @@ static void vfio_enable_intx_kvm(VFIODevice *vdev)
         goto fail;
     }
 
+    if (kvm_vm_ioctl(kvm_state, KVM_EOIFD, &eoifd)) {
+        irqfd.flags |= KVM_IRQFD_FLAG_DEASSIGN;
+        kvm_vm_ioctl(kvm_state, KVM_IRQFD, &irqfd);
+        error_report("vfio: Error: Failed to setup INTx EOI: %s\n",
+                     strerror(errno));
+        goto fail;
+    }
+
     if (ioctl(vdev->fd, VFIO_DEVICE_SET_IRQS, &irq_set_fd)) {
         irqfd.flags |= KVM_IRQFD_FLAG_DEASSIGN;
         kvm_vm_ioctl(kvm_state, KVM_IRQFD, &irqfd);
+        eoifd.flags |= KVM_EOIFD_FLAG_DEASSIGN;
+        kvm_vm_ioctl(kvm_state, KVM_EOIFD, &eoifd);
         error_report("vfio: Error: Failed to setup INTx unmask fd: %s\n",
                      strerror(errno));
         goto fail;
@@ -315,7 +329,10 @@ static void vfio_disable_intx_kvm(VFIODevice *vdev)
     };
     struct kvm_irqfd irqfd = {
         .gsi = vdev->intx.irq,
-        .flags = KVM_IRQFD_FLAG_LEVEL_EOI | KVM_IRQFD_FLAG_DEASSIGN,
+        .flags = KVM_IRQFD_FLAG_LEVEL | KVM_IRQFD_FLAG_DEASSIGN,
+    };
+    struct kvm_eoifd eoifd = {
+        .flags = KVM_EOIFD_FLAG_LEVEL_IRQFD | KVM_EOIFD_FLAG_DEASSIGN,
     };
 
     if (!vdev->intx.kvm_accel) {
@@ -326,11 +343,16 @@ static void vfio_disable_intx_kvm(VFIODevice *vdev)
     vdev->intx.pending = false;
     qemu_set_irq(vdev->pdev.irq[vdev->intx.pin], 0);
 
-    irqfd.fd = event_notifier_get_fd(&vdev->intx.interrupt);
-    irqfd.fd2 = event_notifier_get_fd(&vdev->intx.unmask);
+    eoifd.irqfd = irqfd.fd = event_notifier_get_fd(&vdev->intx.interrupt);
+    eoifd.fd = event_notifier_get_fd(&vdev->intx.unmask);
 
     if (ioctl(vdev->fd, VFIO_DEVICE_SET_IRQS, &irq_set_fd)) {
         error_report("vfio: Error: Failed to disable INTx unmask fd: %s\n",
+                     strerror(errno));
+    }
+
+    if (kvm_vm_ioctl(kvm_state, KVM_EOIFD, &eoifd)) {
+        error_report("vfio: Error: Failed to disable INTx EOI: %s\n",
                      strerror(errno));
     }
 
