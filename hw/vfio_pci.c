@@ -1249,14 +1249,17 @@ static int vfio_setup_msix(VFIODevice *vdev, int pos)
 static void vfio_teardown_msi(VFIODevice *vdev)
 {
     msi_uninit(&vdev->pdev);
-    /* FIXME: Why can't unset just silently do nothing?? */
-    if (vdev->pdev.msix_vector_use_notifier &&
-        vdev->pdev.msix_vector_release_notifier) {
-        msix_unset_vector_notifiers(&vdev->pdev);
+
+    if (vdev->msix) {
+        /* FIXME: Why can't unset just silently do nothing?? */
+        if (vdev->pdev.msix_vector_use_notifier &&
+            vdev->pdev.msix_vector_release_notifier) {
+            msix_unset_vector_notifiers(&vdev->pdev);
+        }
+
+        msix_uninit(&vdev->pdev, &vdev->bars[vdev->msix->table_bar].mem,
+                    &vdev->bars[vdev->msix->pba_bar].mem);
     }
-    msix_uninit(&vdev->pdev, &vdev->bars[vdev->msix->table_bar].mem,
-                &vdev->bars[vdev->msix->pba_bar].mem);
-    g_free(vdev->msix);
 }
 
 /*
@@ -1266,6 +1269,10 @@ static void vfio_unmap_bar(VFIODevice *vdev, int nr)
 {
     VFIOBAR *bar = &vdev->bars[nr];
     uint64_t size;
+
+    if (!memory_region_size(&bar->mem)) {
+        return;
+    }
 
     size = memory_region_size(&bar->mmap_mem);
     if (size) {
@@ -1852,6 +1859,10 @@ static void vfio_put_device(VFIODevice *vdev)
     vdev->group = NULL;
     DPRINTF("vfio_put_device: close vdev->fd\n");
     close(vdev->fd);
+    if (vdev->msix) {
+        g_free(vdev->msix);
+	vdev->msix = NULL;
+    }
 }
 
 static int vfio_initfn(struct PCIDevice *pdev)
@@ -1925,7 +1936,7 @@ static int vfio_initfn(struct PCIDevice *pdev)
                 pci_config_size(&vdev->pdev), vdev->config_offset);
     if (ret < (int)pci_config_size(&vdev->pdev)) {
         error_report("vfio: Failed to read device config space\n");
-        goto out;
+        goto out_put;
     }
 
     /*
@@ -1939,28 +1950,28 @@ static int vfio_initfn(struct PCIDevice *pdev)
     vfio_load_rom(vdev);
 
     if (vfio_early_setup_msix(vdev)) {
-        goto out;
+        goto out_put;
     }
 
     if (vfio_map_bars(vdev)) {
-        goto out_msi;
+        goto out_unmap_bars;
     }
 
     if (vfio_add_capabilities(vdev)) {
-        goto out_bars;
+        goto out_teardown_msi;
     }
 
     if (vfio_enable_intx(vdev)) {
-        goto out_bars;
+        goto out_teardown_msi;
     }
 
     return 0;
 
-out_bars:
-    vfio_unmap_bars(vdev);
-out_msi:
+out_teardown_msi:
     vfio_teardown_msi(vdev);
-out:
+out_unmap_bars:
+    vfio_unmap_bars(vdev);
+out_put:
     vfio_put_device(vdev);
     vfio_put_group(group);
     return -1;
@@ -1972,8 +1983,8 @@ static int vfio_exitfn(struct PCIDevice *pdev)
     VFIOGroup *group = vdev->group;
 
     vfio_disable_interrupts(vdev);
-    vfio_unmap_bars(vdev);
     vfio_teardown_msi(vdev);
+    vfio_unmap_bars(vdev);
     vfio_put_device(vdev);
     vfio_put_group(group);
     return 0;
