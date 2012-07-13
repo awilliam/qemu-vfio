@@ -26,6 +26,7 @@
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <linux/vfio.h>
 
 #include "config.h"
 #include "event_notifier.h"
@@ -42,7 +43,6 @@
 #include "qemu-timer.h"
 #include "range.h"
 #include "vfio_pci.h"
-#include "linux-vfio.h"
 
 //#define DEBUG_VFIO
 #ifdef DEBUG_VFIO
