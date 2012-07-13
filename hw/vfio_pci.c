@@ -47,7 +47,7 @@
 //#define DEBUG_VFIO
 #ifdef DEBUG_VFIO
 #define DPRINTF(fmt, ...) \
-    do { printf("vfio: " fmt, ## __VA_ARGS__); } while (0)
+    do { fprintf(stderr, "vfio: " fmt, ## __VA_ARGS__); } while (0)
 #else
 #define DPRINTF(fmt, ...) \
     do { } while (0)
