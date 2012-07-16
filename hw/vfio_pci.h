@@ -56,7 +56,12 @@ struct VFIOGroup;
 
 typedef struct VFIOContainer {
     int fd;
-    MemoryListener listener;
+    struct {
+        union {
+            MemoryListener listener;
+        };
+        void (*release)(struct VFIOContainer *);
+    } iommu_data;
     QLIST_HEAD(, VFIOGroup) group_list;
     QLIST_ENTRY(VFIOContainer) next;
 } VFIOContainer;

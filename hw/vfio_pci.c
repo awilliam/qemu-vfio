@@ -1064,7 +1064,8 @@ static bool vfio_listener_skipped_section(MemoryRegionSection *section)
 static void vfio_listener_region_add(MemoryListener *listener,
                                      MemoryRegionSection *section)
 {
-    VFIOContainer *container = container_of(listener, VFIOContainer, listener);
+    VFIOContainer *container = container_of(listener, VFIOContainer,
+                                            iommu_data.listener);
     target_phys_addr_t iova = section->offset_within_address_space;
     ram_addr_t size = section->size;
     void *vaddr;
@@ -1092,7 +1093,8 @@ static void vfio_listener_region_add(MemoryListener *listener,
 static void vfio_listener_region_del(MemoryListener *listener,
                                      MemoryRegionSection *section)
 {
-    VFIOContainer *container = container_of(listener, VFIOContainer, listener);
+    VFIOContainer *container = container_of(listener, VFIOContainer,
+                                            iommu_data.listener);
     target_phys_addr_t iova = section->offset_within_address_space;
     ram_addr_t size = section->size;
     int ret;
@@ -1110,6 +1112,11 @@ static void vfio_listener_region_del(MemoryListener *listener,
         error_report("vfio_dma_unmap(%p, 0x%016lx, 0x%lx) = %d (%s)\n",
                      container, iova, size, ret, strerror(errno));
     }
+}
+
+static void vfio_listener_release(VFIOContainer *container)
+{
+    memory_listener_unregister(&container->iommu_data.listener);
 }
 
 /*
@@ -1603,7 +1610,7 @@ static int vfio_connect_container(VFIOGroup *group)
             return -1;
         }
 
-        container->listener = (MemoryListener) {
+        container->iommu_data.listener = (MemoryListener) {
             .begin = vfio_listener_dummy1,
             .commit = vfio_listener_dummy1,
             .region_add = vfio_listener_region_add,
@@ -1617,8 +1624,10 @@ static int vfio_connect_container(VFIOGroup *group)
             .eventfd_add = vfio_listener_dummy3,
             .eventfd_del = vfio_listener_dummy3,
         };
+        container->iommu_data.release = vfio_listener_release;
 
-        memory_listener_register(&container->listener, get_system_memory());
+        memory_listener_register(&container->iommu_data.listener,
+                                 get_system_memory());
 
     } else {
         error_report("vfio: No available IOMMU models\n");
@@ -1649,8 +1658,8 @@ static void vfio_disconnect_container(VFIOGroup *group)
     group->container = NULL;
 
     if (QLIST_EMPTY(&container->group_list)) {
-        if (container->listener.begin) {
-            memory_listener_unregister(&container->listener);
+        if (container->iommu_data.release) {
+            container->iommu_data.release(container);
         }
         QLIST_REMOVE(container, next);
         DPRINTF("vfio_disconnect_container: close container->fd\n");
