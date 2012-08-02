@@ -143,6 +143,7 @@ attr=""
 libattr=""
 xfs=""
 
+vfio_pci="no"
 vhost_net="no"
 kvm="no"
 gprof="no"
@@ -489,6 +490,7 @@ Haiku)
   usb="linux"
   kvm="yes"
   vhost_net="yes"
+  vfio_pci="yes"
   if [ "$cpu" = "i386" -o "$cpu" = "x86_64" ] ; then
     audio_possible_drivers="$audio_possible_drivers fmod"
   fi
@@ -824,6 +826,10 @@ for opt do
   ;;
   --disable-guest-agent) guest_agent="no"
   ;;
+  --disable-vfio-pci) vfio_pci="no"
+  ;;
+  --enable-vfio-pci) vfio_pci="yes"
+  ;;
   *) echo "ERROR: unknown option $opt"; show_help="yes"
   ;;
   esac
@@ -1112,6 +1118,8 @@ echo "  --disable-guest-agent    disable building of the QEMU Guest Agent"
 echo "  --enable-guest-agent     enable building of the QEMU Guest Agent"
 echo "  --with-coroutine=BACKEND coroutine backend. Supported options:"
 echo "                           gthread, ucontext, sigaltstack, windows"
+echo "  --disable-vfio-pci       disable vfio pci device assignement support"
+echo "  --enable-vfio-pci        enable vfio pci device assignment support"
 echo ""
 echo "NOTE: The object files are built at the place where configure is launched"
 exit 1
@@ -3072,6 +3080,7 @@ echo "OpenGL support    $opengl"
 echo "libiscsi support  $libiscsi"
 echo "build guest agent $guest_agent"
 echo "coroutine backend $coroutine_backend"
+echo "VFIO PCI support  $vfio_pci"
 
 if test "$sdl_too_old" = "yes"; then
 echo "-> Your SDL version is too old - please upgrade to have SDL support"
@@ -3754,6 +3763,9 @@ case "$target_arch2" in
   *)
     echo "CONFIG_NO_XEN=y" >> $config_target_mak
 esac
+if test "$vfio_pci" = "yes" -a "$target_softmmu" = "yes" ; then
+  echo "CONFIG_VFIO_PCI=y" >> $config_target_mak
+fi
 case "$target_arch2" in
   i386|x86_64|ppcemb|ppc|ppc64|s390x)
     # Make sure the target and host cpus are compatible
