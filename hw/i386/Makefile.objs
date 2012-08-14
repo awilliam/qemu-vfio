@@ -11,5 +11,6 @@ obj-$(CONFIG_XEN_PCI_PASSTHROUGH) += xen-host-pci-device.o
 obj-$(CONFIG_XEN_PCI_PASSTHROUGH) += xen_pt.o xen_pt_config_init.o xen_pt_msi.o
 obj-y += kvm/
 obj-$(CONFIG_SPICE) += qxl.o qxl-logger.o qxl-render.o
+obj-$(CONFIG_VFIO_PCI) += vfio_pci.o
 
 obj-y := $(addprefix ../,$(obj-y))
