@@ -167,6 +167,7 @@ attr=""
 libattr=""
 xfs=""
 
+vfio_pci="no"
 vhost_net="no"
 kvm="no"
 gprof="no"
@@ -528,6 +529,7 @@ Haiku)
   usb="linux"
   kvm="yes"
   vhost_net="yes"
+  vfio_pci="yes"
   if [ "$cpu" = "i386" -o "$cpu" = "x86_64" ] ; then
     audio_possible_drivers="$audio_possible_drivers fmod"
   fi
@@ -3180,6 +3182,7 @@ echo "libiscsi support  $libiscsi"
 echo "build guest agent $guest_agent"
 echo "seccomp support   $seccomp"
 echo "coroutine backend $coroutine_backend"
+echo "VFIO PCI support  $vfio_pci"
 
 if test "$sdl_too_old" = "yes"; then
 echo "-> Your SDL version is too old - please upgrade to have SDL support"
@@ -3920,6 +3923,9 @@ if test "$target_softmmu" = "yes" ; then
   echo "subdir-$target: subdir-libhw$target_phys_bits" >> $config_host_mak
   if test "$smartcard_nss" = "yes" ; then
     echo "subdir-$target: subdir-libcacard" >> $config_host_mak
+  fi
+  if test "$vfio_pci" = "yes" ; then
+    echo "CONFIG_VFIO_PCI=y" >> $config_target_mak
   fi
   case "$target_arch2" in
     i386|x86_64)
