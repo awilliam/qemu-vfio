@@ -59,6 +59,15 @@ typedef struct VFIOBAR {
     uint8_t nr; /* cache the BAR number for debug */
 } VFIOBAR;
 
+typedef struct VFIOLegacyIO {
+    off_t fd_offset;
+    int fd;
+    MemoryRegion mem;
+    off_t region_offset;
+    size_t size;
+    uint32_t flags;
+} VFIOLegacyIO;
+
 typedef struct VFIOINTx {
     bool pending; /* interrupt pending */
     bool kvm_accel; /* set when QEMU bypass through KVM enabled */
@@ -126,10 +135,15 @@ typedef struct VFIODevice {
     int nr_vectors; /* Number of MSI/MSIX vectors currently in use */
     int interrupt; /* Current interrupt type */
     VFIOBAR bars[PCI_NUM_REGIONS - 1]; /* No ROM */
+    VFIOLegacyIO vga[3]; /* 0xa0000, 0x3b0, 0x3c0 */
     PCIHostDeviceAddress host;
     QLIST_ENTRY(VFIODevice) next;
     struct VFIOGroup *group;
+    uint32_t features;
+#define VFIO_FEATURE_ENABLE_VGA_BIT 0
+#define VFIO_FEATURE_ENABLE_VGA (1 << VFIO_FEATURE_ENABLE_VGA_BIT)
     bool reset_works;
+    bool has_vga;
 } VFIODevice;
 
 typedef struct VFIOGroup {
@@ -957,6 +971,87 @@ static const MemoryRegionOps vfio_bar_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
+static void vfio_legacy_write(void *opaque, hwaddr addr,
+                              uint64_t data, unsigned size)
+{
+    VFIOLegacyIO *io = opaque;
+    union {
+        uint8_t byte;
+        uint16_t word;
+        uint32_t dword;
+        uint64_t qword;
+    } buf;
+    off_t offset = io->fd_offset + io->region_offset + addr;
+
+    switch (size) {
+    case 1:
+        buf.byte = data;
+        break;
+    case 2:
+        buf.word = cpu_to_le16(data);
+        break;
+    case 4:
+        buf.dword = cpu_to_le32(data);
+        break;
+    default:
+        hw_error("vfio: unsupported write size, %d bytes\n", size);
+        break;
+    }
+
+    if (pwrite(io->fd, &buf, size, offset) != size) {
+        error_report("%s(,0x%"HWADDR_PRIx", 0x%"PRIx64", %d) failed: %m\n",
+                     __func__, io->region_offset + addr, data, size);
+    }
+
+    DPRINTF("%s(0x%"HWADDR_PRIx", 0x%"PRIx64", %d)\n",
+            __func__, io->region_offset + addr, data, size);
+}
+
+static uint64_t vfio_legacy_read(void *opaque, hwaddr addr, unsigned size)
+{
+    VFIOLegacyIO *io = opaque;
+    union {
+        uint8_t byte;
+        uint16_t word;
+        uint32_t dword;
+        uint64_t qword;
+    } buf;
+    uint64_t data = 0;
+    off_t offset = io->fd_offset + io->region_offset + addr;
+
+    if (pread(io->fd, &buf, size, offset) != size) {
+        error_report("%s(,0x%"HWADDR_PRIx", %d) failed: %m\n",
+                     __func__, io->region_offset + addr, size);
+        return (uint64_t)-1;
+    }
+
+    switch (size) {
+    case 1:
+        data = buf.byte;
+        break;
+    case 2:
+        data = le16_to_cpu(buf.word);
+        break;
+    case 4:
+        data = le32_to_cpu(buf.dword);
+        break;
+    default:
+        hw_error("vfio: unsupported read size, %d bytes\n", size);
+        break;
+    }
+
+    DPRINTF("%s(0x%"HWADDR_PRIx", %d) = 0x%"PRIx64"\n",
+            __func__, io->region_offset + addr, size, data);
+
+    return data;
+}
+
+static const MemoryRegionOps vfio_legacy_ops = {
+    .read = vfio_legacy_read,
+    .write = vfio_legacy_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+};
+
 /*
  * PCI config space
  */
@@ -1497,6 +1592,26 @@ static void vfio_map_bars(VFIODevice *vdev)
     for (i = 0; i < PCI_ROM_SLOT; i++) {
         vfio_map_bar(vdev, i);
     }
+
+    if (vdev->has_vga && (vdev->features & VFIO_FEATURE_ENABLE_VGA)) {
+        memory_region_init_io(&vdev->vga[0].mem, &vfio_legacy_ops,
+                              &vdev->vga[0], "vfio-vga-mmio@0xa0000",
+                              0xc0000 - 0xa0000);
+        memory_region_add_subregion_overlap(pci_address_space(&vdev->pdev),
+                                            0xa0000, &vdev->vga[0].mem, 1);
+
+        memory_region_init_io(&vdev->vga[1].mem, &vfio_legacy_ops,
+                              &vdev->vga[1], "vfio-vga-io@0x3b0",
+                              0x3bc - 0x3b0);
+        memory_region_add_subregion_overlap(pci_address_space_io(&vdev->pdev),
+                                            0x3b0, &vdev->vga[1].mem, 1);
+
+        memory_region_init_io(&vdev->vga[2].mem, &vfio_legacy_ops,
+                              &vdev->vga[2], "vfio-vga-io@0x3c0",
+                              0x3e0 - 0x3c0);
+        memory_region_add_subregion_overlap(pci_address_space_io(&vdev->pdev),
+                                            0x3c0, &vdev->vga[2].mem, 1);
+    }
 }
 
 static void vfio_unmap_bars(VFIODevice *vdev)
@@ -1505,6 +1620,20 @@ static void vfio_unmap_bars(VFIODevice *vdev)
 
     for (i = 0; i < PCI_ROM_SLOT; i++) {
         vfio_unmap_bar(vdev, i);
+    }
+
+    if (vdev->has_vga && (vdev->features & VFIO_FEATURE_ENABLE_VGA)) {
+        memory_region_del_subregion(pci_address_space(&vdev->pdev),
+                                    &vdev->vga[0].mem);
+        memory_region_destroy(&vdev->vga[0].mem);
+
+        memory_region_del_subregion(pci_address_space_io(&vdev->pdev),
+                                    &vdev->vga[1].mem);
+        memory_region_destroy(&vdev->vga[1].mem);
+
+        memory_region_del_subregion(pci_address_space_io(&vdev->pdev),
+                                    &vdev->vga[2].mem);
+        memory_region_destroy(&vdev->vga[2].mem);
     }
 }
 
@@ -1901,6 +2030,49 @@ static int vfio_get_device(VFIOGroup *group, const char *name, VFIODevice *vdev)
     vdev->config_size = reg_info.size;
     vdev->config_offset = reg_info.offset;
 
+    if (dev_info.flags & VFIO_DEVICE_FLAGS_PCI_VGA) {
+        struct vfio_region_info mmio_info, io_info;
+
+        if (!(dev_info.flags & VFIO_DEVICE_FLAGS_PCI_LEGACY_MMIO) ||
+            !(dev_info.flags & VFIO_DEVICE_FLAGS_PCI_LEGACY_IOPORT)) {
+            error_report("vfio: Device reports VGA support but not legacy "
+                         "MMIO or I/O port ranges.  VGA support disabled.\n");
+            goto error;
+        }
+
+        mmio_info.argsz = io_info.argsz = sizeof(struct vfio_region_info);
+        mmio_info.index = VFIO_PCI_LEGACY_MMIO_REGION_INDEX;
+        io_info.index = VFIO_PCI_LEGACY_IOPORT_REGION_INDEX;
+
+        ret = ioctl(vdev->fd, VFIO_DEVICE_GET_REGION_INFO, &mmio_info);
+        if (ret) {
+            error_report("vfio: Unable to access VGA MMIO resources: %m\n");
+            goto error;
+        }
+
+        vdev->vga[0].flags = mmio_info.flags;
+        vdev->vga[0].size = mmio_info.size;
+        vdev->vga[0].fd_offset = mmio_info.offset;
+        vdev->vga[0].fd = vdev->fd;
+        vdev->vga[0].region_offset = 0xa0000;
+
+        ret = ioctl(vdev->fd, VFIO_DEVICE_GET_REGION_INFO, &io_info);
+        if (ret) {
+            error_report("vfio: Unable to access VGA IOPORT resources: %m\n");
+            goto error;
+        }
+
+        vdev->vga[1].flags = vdev->vga[2].flags = io_info.flags;
+        vdev->vga[1].size = vdev->vga[2].size = io_info.size;
+        vdev->vga[1].fd_offset = vdev->vga[2].fd_offset = io_info.offset;
+        vdev->vga[1].fd = vdev->vga[2].fd = vdev->fd;
+
+        vdev->vga[1].region_offset = 0x3b0;
+        vdev->vga[2].region_offset = 0x3c0;
+
+        vdev->has_vga = true;
+    }
+
 error:
     if (ret) {
         QLIST_REMOVE(vdev, next);
@@ -2095,6 +2267,8 @@ static Property vfio_pci_dev_properties[] = {
     DEFINE_PROP_PCI_HOST_DEVADDR("host", VFIODevice, host),
     DEFINE_PROP_UINT32("x-intx-mmap-timeout-ms", VFIODevice,
                        intx.mmap_timeout, 1100),
+    DEFINE_PROP_BIT("x-vga", VFIODevice, features,
+                    VFIO_FEATURE_ENABLE_VGA_BIT, false),
     /*
      * TODO - support passed fds... is this necessary?
      * DEFINE_PROP_STRING("vfiofd", VFIODevice, vfiofd_name),
