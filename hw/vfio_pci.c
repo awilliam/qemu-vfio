@@ -48,6 +48,10 @@
     do { } while (0)
 #endif
 
+/* Extra debugging, trap acceleration paths for more logging */
+#define VFIO_ALLOW_MMAP 1
+#define VFIO_ALLOW_KVM_INTX 1
+
 struct VFIODevice;
 
 typedef struct VFIOQuirk {
@@ -304,7 +308,7 @@ static void vfio_enable_intx_kvm(VFIODevice *vdev)
     int ret, argsz;
     int32_t *pfd;
 
-    if (!kvm_irqfds_enabled() ||
+    if (!VFIO_ALLOW_KVM_INTX || !kvm_irqfds_enabled() ||
         vdev->intx.route.mode != PCI_INTX_ENABLED ||
         !kvm_check_extension(kvm_state, KVM_CAP_IRQFD_RESAMPLE)) {
         return;
@@ -924,8 +928,16 @@ static void vfio_bar_write(void *opaque, hwaddr addr,
                      __func__, addr, data, size);
     }
 
-    DPRINTF("%s(BAR%d+0x%"HWADDR_PRIx", 0x%"PRIx64", %d)\n",
-            __func__, bar->nr, addr, data, size);
+#ifdef DEBUG_VFIO
+    {
+        VFIODevice *vdev = container_of(bar, VFIODevice, bars[bar->nr]);
+
+        DPRINTF("%s(%04x:%02x:%02x.%x:BAR%d+0x%"HWADDR_PRIx", 0x%"PRIx64
+                ", %d)\n", __func__, vdev->host.domain, vdev->host.bus,
+                vdev->host.slot, vdev->host.function, bar->nr, addr,
+                data, size);
+    }
+#endif
 
     /*
      * A read or write to a BAR always signals an INTx EOI.  This will
@@ -971,8 +983,16 @@ static uint64_t vfio_bar_read(void *opaque,
         break;
     }
 
-    DPRINTF("%s(BAR%d+0x%"HWADDR_PRIx", %d) = 0x%"PRIx64"\n",
-            __func__, bar->nr, addr, size, data);
+#ifdef DEBUG_VFIO
+    {
+        VFIODevice *vdev = container_of(bar, VFIODevice, bars[bar->nr]);
+
+        DPRINTF("%s(%04x:%02x:%02x.%x:BAR%d+0x%"HWADDR_PRIx
+                ", %d) = 0x%"PRIx64"\n", __func__, vdev->host.domain,
+                vdev->host.bus, vdev->host.slot, vdev->host.function,
+                bar->nr, addr, size, data);
+    }
+#endif
 
     /* Same as write above */
     vfio_eoi(container_of(bar, VFIODevice, bars[bar->nr]));
@@ -1676,7 +1696,7 @@ static void vfio_listener_region_add(MemoryListener *listener,
     int ret;
 
     if (vfio_listener_skipped_section(section)) {
-        DPRINTF("vfio: SKIPPING region_add %"HWADDR_PRIx" - %"PRIx64"\n",
+        DPRINTF("SKIPPING region_add %"HWADDR_PRIx" - %"PRIx64"\n",
                 section->offset_within_address_space,
                 section->offset_within_address_space + section->size - 1);
         return;
@@ -1700,7 +1720,7 @@ static void vfio_listener_region_add(MemoryListener *listener,
             section->offset_within_region +
             (iova - section->offset_within_address_space);
 
-    DPRINTF("vfio: region_add %"HWADDR_PRIx" - %"HWADDR_PRIx" [%p]\n",
+    DPRINTF("region_add %"HWADDR_PRIx" - %"HWADDR_PRIx" [%p]\n",
             iova, end - 1, vaddr);
 
     ret = vfio_dma_map(container, iova, end - iova, vaddr, section->readonly);
@@ -1720,7 +1740,7 @@ static void vfio_listener_region_del(MemoryListener *listener,
     int ret;
 
     if (vfio_listener_skipped_section(section)) {
-        DPRINTF("vfio: SKIPPING region_del %"HWADDR_PRIx" - %"PRIx64"\n",
+        DPRINTF("SKIPPING region_del %"HWADDR_PRIx" - %"PRIx64"\n",
                 section->offset_within_address_space,
                 section->offset_within_address_space + section->size - 1);
         return;
@@ -1740,7 +1760,7 @@ static void vfio_listener_region_del(MemoryListener *listener,
         return;
     }
 
-    DPRINTF("vfio: region_del %"HWADDR_PRIx" - %"HWADDR_PRIx"\n",
+    DPRINTF("region_del %"HWADDR_PRIx" - %"HWADDR_PRIx"\n",
             iova, end - 1);
 
     ret = vfio_dma_unmap(container, iova, end - iova);
@@ -1943,7 +1963,7 @@ static int vfio_mmap_bar(VFIOBAR *bar, MemoryRegion *mem, MemoryRegion *submem,
 {
     int ret = 0;
 
-    if (size && bar->flags & VFIO_REGION_INFO_FLAG_MMAP) {
+    if (VFIO_ALLOW_MMAP && size && bar->flags & VFIO_REGION_INFO_FLAG_MMAP) {
         int prot = 0;
 
         if (bar->flags & VFIO_REGION_INFO_FLAG_READ) {
