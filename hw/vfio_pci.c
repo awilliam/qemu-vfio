@@ -130,6 +130,7 @@ typedef struct VFIODevice {
     PCIHostDeviceAddress host;
     QLIST_ENTRY(VFIODevice) next;
     struct VFIOGroup *group;
+    uint8_t bustype;
     bool reset_works;
 } VFIODevice;
 
@@ -1506,6 +1507,122 @@ static uint8_t vfio_std_cap_max_size(PCIDevice *pdev, uint8_t pos)
     return next - pos;
 }
 
+static void vfio_set_word_bits(uint8_t *buf, uint16_t val, uint16_t mask)
+{
+    pci_set_word(buf, (pci_get_word(buf) & ~mask) | val);
+}
+
+static void vfio_add_emulated_word(VFIODevice *vdev, int pos,
+                                   uint16_t val, uint16_t mask)
+{
+    vfio_set_word_bits(vdev->pdev.config + pos, val, mask);
+    vfio_set_word_bits(vdev->pdev.wmask + pos, ~mask, mask);
+    vfio_set_word_bits(vdev->emulated_config_bits + pos, mask, mask);
+}
+
+static void vfio_set_long_bits(uint8_t *buf, uint32_t val, uint32_t mask)
+{
+    pci_set_long(buf, (pci_get_long(buf) & ~mask) | val);
+}
+
+static void vfio_add_emulated_long(VFIODevice *vdev, int pos,
+                                   uint32_t val, uint32_t mask)
+{
+    vfio_set_long_bits(vdev->pdev.config + pos, val, mask);
+    vfio_set_long_bits(vdev->pdev.wmask + pos, ~mask, mask);
+    vfio_set_long_bits(vdev->emulated_config_bits + pos, mask, mask);
+}
+
+static int vfio_setup_pcie_cap(VFIODevice *vdev, int pos, uint8_t size)
+{
+    uint16_t flags;
+    uint8_t type;
+    enum {
+        VFIO_BUS_TYPE_PCI,
+        VFIO_BUS_TYPE_PCIE,
+        VFIO_BUS_TYPE_PCIE_RC,
+    };
+
+    flags = pci_get_word(vdev->pdev.config + pos + PCI_CAP_FLAGS);
+    type = (flags & PCI_EXP_FLAGS_TYPE) >> 4;
+
+    switch (type) {
+    case PCI_EXP_TYPE_ENDPOINT:
+    case PCI_EXP_TYPE_LEG_END:
+    case PCI_EXP_TYPE_RC_END:
+        break;
+    default:
+        error_report("vfio: Assignment of PCIe type 0x%x "
+                     "devices is not currently supported", type);
+        return -EINVAL;
+    }
+
+    if (vdev->bustype > VFIO_BUS_TYPE_PCIE_RC) {
+        error_report("vfio: Unknown bustype %d.  Accepted values: "
+                     "%d (Legacy PCI [default]), %d (PCI Express), "
+                     "%d (PCI Express Root-Complex)", vdev->bustype,
+                     VFIO_BUS_TYPE_PCI, VFIO_BUS_TYPE_PCIE,
+                     VFIO_BUS_TYPE_PCIE_RC);
+        return -EINVAL;
+    }
+
+    switch (vdev->bustype) {
+    case VFIO_BUS_TYPE_PCI:
+        /*
+         * Use express capability as-is on PCI bus.  It doesn't make much
+         * sense to even expose, but some drivers (ex. tg3) depend on it
+         * and guests don't seem to be particular about it.  We'll need
+         * to revist this if we ever expose an IOMMU to the guest.
+         */
+        return pci_add_capability(&vdev->pdev, PCI_CAP_ID_EXP, pos, size);
+
+    case VFIO_BUS_TYPE_PCIE:
+        if (type == PCI_EXP_TYPE_RC_END) {
+            /* Type becomes non-Integrated Endpoint */
+            vfio_add_emulated_word(vdev, pos + PCI_CAP_FLAGS,
+                                   PCI_EXP_TYPE_ENDPOINT << 4,
+                                   PCI_EXP_FLAGS_TYPE);
+            /* XXX Implement LNKCAP fields? */
+        }
+
+        return pci_add_capability(&vdev->pdev, PCI_CAP_ID_EXP, pos, size);
+
+    case VFIO_BUS_TYPE_PCIE_RC:
+        switch (type) {
+        case PCI_EXP_TYPE_ENDPOINT:
+            /* Type becomes Integrated Endpoint */
+            vfio_add_emulated_word(vdev, pos + PCI_CAP_FLAGS,
+                                   PCI_EXP_TYPE_RC_END << 4,
+                                   PCI_EXP_FLAGS_TYPE);
+
+            /* Link Capabilities, Status, and Control goes away */
+            if (size < PCI_EXP_LNKCTL) {
+                break;
+            }
+            vfio_add_emulated_long(vdev, pos + PCI_EXP_LNKCAP, 0U, ~0U);
+            vfio_add_emulated_long(vdev, pos + PCI_EXP_LNKCTL, 0U, ~0U);
+
+            /* Link 2 Capabilities, Status, and Control goes away */
+            if (size < PCI_EXP_LNKCTL2) {
+                break;
+            }
+            vfio_add_emulated_long(vdev, pos + 0x2c, 0U, ~0U);
+            vfio_add_emulated_long(vdev, pos + PCI_EXP_LNKCTL2, 0U, ~0U);
+            break;
+        case PCI_EXP_TYPE_LEG_END:
+            /*
+             * Legacy endpoints don't belong on the root complex.  Windows
+             * seems to be happier with devices if we skip the capability.
+             */
+            return 0;
+        }
+
+        return pci_add_capability(&vdev->pdev, PCI_CAP_ID_EXP, pos, size);
+    }
+
+    return -EINVAL;
+}
+
 static int vfio_add_std_cap(VFIODevice *vdev, uint8_t pos)
 {
     PCIDevice *pdev = &vdev->pdev;
@@ -1536,12 +1653,21 @@ static int vfio_add_std_cap(VFIODevice *vdev, uint8_t pos)
             return ret;
         }
     } else {
-        pdev->config[PCI_CAPABILITY_LIST] = 0; /* Begin the rebuild */
+        /* Begin the rebuild, use QEMU emulated list bits */
+        pdev->config[PCI_CAPABILITY_LIST] = 0;
+        vdev->emulated_config_bits[PCI_CAPABILITY_LIST] = 0xff;
+        vdev->emulated_config_bits[PCI_STATUS] |= PCI_STATUS_CAP_LIST;
     }
+
+    /* Use emulated next pointer to allow dropping caps */
+    pci_set_byte(vdev->emulated_config_bits + pos + 1, 0xff);
 
     switch (cap_id) {
     case PCI_CAP_ID_MSI:
         ret = vfio_setup_msi(vdev, pos);
+        break;
+    case PCI_CAP_ID_EXP:
+        ret = vfio_setup_pcie_cap(vdev, pos, size);
         break;
     case PCI_CAP_ID_MSIX:
         ret = vfio_setup_msix(vdev, pos);
@@ -2102,6 +2228,7 @@ static Property vfio_pci_dev_properties[] = {
     DEFINE_PROP_PCI_HOST_DEVADDR("host", VFIODevice, host),
     DEFINE_PROP_UINT32("x-intx-mmap-timeout-ms", VFIODevice,
                        intx.mmap_timeout, 1100),
+    DEFINE_PROP_UINT8("x-bustype", VFIODevice, bustype, 0),
     /*
      * TODO - support passed fds... is this necessary?
      * DEFINE_PROP_STRING("vfiofd", VFIODevice, vfiofd_name),
