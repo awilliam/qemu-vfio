@@ -3174,6 +3174,29 @@ static void vfio_pci_reset(DeviceState *dev)
 
     vfio_disable_interrupts(vdev);
 
+    /*
+     * VGA devices typically do not support any kind of FLR and though they
+     * advertise a soft reset through PM, it's not sufficient.  VFIO provides
+     * an interface to reset the PCI bus of a device.  A bus can have more
+     * than one device (and may even host subordinate buses), so VFIO requires
+     * that all of the devices be attached to the same container.  This is
+     * usually not a problem as graphics devices are typically on their own
+     * bus and even though they often support multiple functions to provide
+     * an audio controller, they don't have ACS support, resulting in the
+     * functions being grouped together.  If by chance they did support ACS,
+     * the user would need to assign devices from each of the groups behind
+     * the bridge in order for this bus reset to be allowed.
+     *
+     * If this becomes an issue we could have a vfio-pci stub device which
+     * adds devices to the container, but does not expose them to the vm.
+     */
+    if (vdev->has_vga) {
+        if (ioctl(vdev->fd, VFIO_DEVICE_PCI_BUS_RESET)) {
+            error_report("Attempt to reset PCI bus for VGA support failed (%m)."
+                         "  VGA may not work.");
+        }
+    }
+
     /* Make sure the device is in D0 */
     if (vdev->pm_cap) {
         uint16_t pmcsr;
