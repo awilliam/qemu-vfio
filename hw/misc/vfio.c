@@ -163,6 +163,7 @@ typedef struct VFIODevice {
     VFIOINTx intx;
     unsigned int config_size;
     uint8_t *emulated_config_bits; /* QEMU emulated bits, little-endian */
+    uint8_t *read_only_config_bits; /* Bits not guest modifiable to VFIO */
     off_t config_offset; /* Offset of config space region within device fd */
     unsigned int rom_size;
     off_t rom_offset; /* Offset of ROM region within device fd */
@@ -183,6 +184,7 @@ typedef struct VFIODevice {
 #define VFIO_FEATURE_ENABLE_VGA (1 << VFIO_FEATURE_ENABLE_VGA_BIT)
     int32_t bootindex;
     uint8_t pm_cap;
+    uint8_t pcie_cap;
     bool reset_works;
     bool has_vga;
     bool pci_aer;
@@ -1968,13 +1970,20 @@ static void vfio_pci_write_config(PCIDevice *pdev, uint32_t addr,
                                   uint32_t val, int len)
 {
     VFIODevice *vdev = DO_UPCAST(VFIODevice, pdev, pdev);
-    uint32_t val_le = cpu_to_le32(val);
+    uint32_t ro_bits = 0, ro_val, val_le;
 
     DPRINTF("%s(%04x:%02x:%02x.%x, @0x%x, 0x%x, len=0x%x)\n", __func__,
             vdev->host.domain, vdev->host.bus, vdev->host.slot,
             vdev->host.function, addr, val, len);
 
-    /* Write everything to VFIO, let it filter out what we can't write */
+    /*
+     * Read-only bits should be cleared in pdev->wmask and set to the
+     * value we want for hardware in pdev->config.  ro_bits is already le.
+     */
+    memcpy(&ro_bits, vdev->read_only_config_bits + addr, len);
+    ro_val = pci_default_read_config(pdev, addr, len);
+    val_le = (cpu_to_le32(ro_val) & ro_bits) | (cpu_to_le32(val) & ~ro_bits);
+
     if (pwrite(vdev->fd, &val_le, len, vdev->config_offset + addr) != len) {
         error_report("%s(%04x:%02x:%02x.%x, 0x%x, 0x%x, 0x%x) failed: %m",
                      __func__, vdev->host.domain, vdev->host.bus,
@@ -2552,6 +2561,64 @@ static void vfio_add_emulated_long(VFIODevice *vdev, int pos,
     vfio_set_long_bits(vdev->emulated_config_bits + pos, mask, mask);
 }
 
+/*
+ * The hypervisor needs to disable NoSnoop+ on the device.  NoSnoop
+ * transactions will bypass processor cache creating a coherency problem
+ * between cache and memory.  Instructions like WBINVD on x86 are intended
+ * to allow drivers to have a synchronization mechanism, but KVM doesn't
+ * emulate them.  We therefore prevent the device from using NoSnoop via
+ * the PCIe device control register.  If we can't clear the bit, abort
+ * since we can't guarantee coherency.
+ *
+ * NB - Devices like graphics may re-enable this through PCI config space
+ * backdoors.  We rely on hardware to honor the clearing of this bit.
+ */
+static void vfio_pcie_reset(VFIODevice *vdev)
+{
+    ssize_t ret;
+    uint16_t devctl;
+
+    if (!vdev->pcie_cap) {
+        return;
+    }
+
+    ret = pread(vdev->fd, &devctl, sizeof(devctl),
+                vdev->config_offset + vdev->pcie_cap + PCI_EXP_DEVCTL);
+    if (ret != sizeof(devctl)) {
+        hw_error("%s: %04x:%02x:%02x.%x "
+                 "Failed to read PCIe device control register\n", __func__,
+                 vdev->host.domain, vdev->host.bus, vdev->host.slot,
+                 vdev->host.function);
+    }
+
+    devctl = le16_to_cpu(devctl);
+
+    if (!(devctl & PCI_EXP_DEVCTL_NOSNOOP_EN)) {
+        return;
+    }
+
+    devctl = cpu_to_le16(devctl & ~PCI_EXP_DEVCTL_NOSNOOP_EN);
+
+    ret = pwrite(vdev->fd, &devctl, sizeof(devctl),
+                 vdev->config_offset + vdev->pcie_cap + PCI_EXP_DEVCTL);
+    if (ret != sizeof(devctl)) {
+        hw_error("%s: %04x:%02x:%02x.%x "
+                 "Failed to write PCIe device control register\n", __func__,
+                 vdev->host.domain, vdev->host.bus, vdev->host.slot,
+                 vdev->host.function);
+    }
+
+    ret = pread(vdev->fd, &devctl, sizeof(devctl),
+                vdev->config_offset + vdev->pcie_cap + PCI_EXP_DEVCTL);
+    if (ret != sizeof(devctl) ||
+        le16_to_cpu(devctl) & PCI_EXP_DEVCTL_NOSNOOP_EN) {
+        hw_error("%s: %04x:%02x:%02x.%x "
+                 "Failed to verify PCIe NoSnoop disable\n", __func__,
+                 vdev->host.domain, vdev->host.bus, vdev->host.slot,
+                 vdev->host.function);
+    }
+}
+
 static int vfio_setup_pcie_cap(VFIODevice *vdev, int pos, uint8_t size)
 {
     uint16_t flags;
@@ -2568,6 +2635,17 @@ static int vfio_setup_pcie_cap(VFIODevice *vdev, int pos, uint8_t size)
                      "devices is not currently supported", type);
         return -EINVAL;
     }
+
+    vdev->pcie_cap = pos;
+
+    /*
+     * PCIe NoSnoop is cleared, fixed, and read-only to the guest.  See
+     * vfio_pcie_reset() for details.
+     */
+    vfio_add_emulated_word(vdev, pos + PCI_EXP_DEVCTL, 0,
+                           PCI_EXP_DEVCTL_NOSNOOP_EN);
+    vfio_set_word_bits(vdev->read_only_config_bits + pos + PCI_EXP_DEVCTL,
+                       PCI_EXP_DEVCTL_NOSNOOP_EN, PCI_EXP_DEVCTL_NOSNOOP_EN);
 
     if (!pci_bus_is_express(vdev->pdev.bus)) {
         /*
@@ -2807,6 +2885,7 @@ static void vfio_pci_pre_reset(VFIODevice *vdev)
 static void vfio_pci_post_reset(VFIODevice *vdev)
 {
     vfio_enable_intx(vdev);
+    vfio_pcie_reset(vdev);
 }
 
 static bool vfio_pci_host_match(PCIHostDeviceAddress *host1,
@@ -3559,6 +3638,7 @@ static int vfio_initfn(PCIDevice *pdev)
 
     /* vfio emulates a lot for us, but some bits need extra love */
     vdev->emulated_config_bits = g_malloc0(vdev->config_size);
+    vdev->read_only_config_bits = g_malloc0(vdev->config_size);
 
     /* QEMU can choose to expose the ROM or not */
     memset(vdev->emulated_config_bits + PCI_ROM_ADDRESS, 0xff, 4);
@@ -3621,6 +3701,7 @@ out_teardown:
     vfio_unmap_bars(vdev);
 out_put:
     g_free(vdev->emulated_config_bits);
+    g_free(vdev->read_only_config_bits);
     vfio_put_device(vdev);
     vfio_put_group(group);
     return ret;
@@ -3640,6 +3721,7 @@ static void vfio_exitfn(PCIDevice *pdev)
     vfio_teardown_msi(vdev);
     vfio_unmap_bars(vdev);
     g_free(vdev->emulated_config_bits);
+    g_free(vdev->read_only_config_bits);
     g_free(vdev->rom);
     vfio_put_device(vdev);
     vfio_put_group(group);
