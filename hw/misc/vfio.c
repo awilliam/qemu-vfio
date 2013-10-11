@@ -210,6 +210,8 @@ static QLIST_HEAD(, VFIOContainer)
 static QLIST_HEAD(, VFIOGroup)
     group_list = QLIST_HEAD_INITIALIZER(group_list);
 
+int vfio_kvm_device_fd = -1;
+
 static void vfio_disable_interrupts(VFIODevice *vdev);
 static uint32_t vfio_pci_read_config(PCIDevice *pdev, uint32_t addr, int len);
 static void vfio_pci_write_config(PCIDevice *pdev, uint32_t addr,
@@ -3119,6 +3121,63 @@ static void vfio_pci_reset_handler(void *opaque)
     }
 }
 
+static void vfio_kvm_device_add_group(VFIOGroup *group)
+{
+#ifdef CONFIG_KVM
+    struct kvm_device_attr attr = {
+        .group = KVM_DEV_VFIO_GROUP,
+        .attr = KVM_DEV_VFIO_GROUP_ADD,
+        .addr = (uint64_t)(unsigned long)&group->fd,
+    };
+
+    if (vfio_kvm_device_fd < 0) {
+        struct kvm_create_device cd = {
+            .type = KVM_DEV_TYPE_VFIO,
+        };
+
+        if (kvm_vm_ioctl(kvm_state, KVM_CREATE_DEVICE, &cd)) {
+            DPRINTF("KVM_CREATE_DEVICE: %m\n");
+            return;
+        }
+
+        vfio_kvm_device_fd = cd.fd;
+    }
+
+    if (ioctl(vfio_kvm_device_fd, KVM_SET_DEVICE_ATTR, &attr)) {
+        error_report("Failed to add group %d to KVM VFIO device: %m",
+                     group->groupid);
+    }
+#endif
+}
+
+static void vfio_kvm_device_del_group(VFIOGroup *group)
+{
+#ifdef CONFIG_KVM
+    struct kvm_device_attr attr = {
+        .group = KVM_DEV_VFIO_GROUP,
+        .attr = KVM_DEV_VFIO_GROUP_DEL,
+        .addr = (uint64_t)(unsigned long)&group->fd,
+    };
+
+    if (vfio_kvm_device_fd < 0) {
+        return;
+    }
+
+    if (ioctl(vfio_kvm_device_fd, KVM_SET_DEVICE_ATTR, &attr)) {
+        error_report("Failed to remove group %d to KVM VFIO device: %m",
+                     group->groupid);
+    }
+#endif
+}
+
+static void vfio_kvm_device_cleanup(void)
+{
+    if (vfio_kvm_device_fd >= 0) {
+        close(vfio_kvm_device_fd);
+        vfio_kvm_device_fd = -1;
+    }
+}
+
 static int vfio_connect_container(VFIOGroup *group)
 {
     VFIOContainer *container;
@@ -3267,6 +3326,8 @@ static VFIOGroup *vfio_get_group(int groupid)
 
     QLIST_INSERT_HEAD(&group_list, group, next);
 
+    vfio_kvm_device_add_group(group);
+
     return group;
 }
 
@@ -3276,6 +3337,7 @@ static void vfio_put_group(VFIOGroup *group)
         return;
     }
 
+    vfio_kvm_device_del_group(group);
     vfio_disconnect_container(group);
     QLIST_REMOVE(group, next);
     DPRINTF("vfio_put_group: close group->fd\n");
@@ -3284,6 +3346,7 @@ static void vfio_put_group(VFIOGroup *group)
 
     if (QLIST_EMPTY(&group_list)) {
         qemu_unregister_reset(vfio_pci_reset_handler, NULL);
+        vfio_kvm_device_cleanup();
     }
 }
 
