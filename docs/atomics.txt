@@ -4,15 +4,6 @@ between QEMU and the guest).  Multi-threaded programs use various tools
 to instruct the compiler and the CPU to restrict the order to something
 that is consistent with the expectations of the programmer.
 
-The most basic tool is locking.  Mutexes, condition variables and
-semaphores are used in QEMU, and should be the default approach to
-synchronization.  Anything else is considerably harder, but it's
-also justified more often than one would like.  The two tools that
-are provided by qemu/atomic.h are memory barriers and atomic operations.
-
-Macros defined by qemu/atomic.h fall in three camps:
-
-- compiler barriers: barrier();
 
 - weak atomic access and manual memory barriers: atomic_read(),
   atomic_set(), smp_rmb(), smp_wmb(), smp_mb(), smp_read_barrier_depends();
