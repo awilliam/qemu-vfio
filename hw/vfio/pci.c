@@ -35,6 +35,8 @@
 #include "pci.h"
 #include "trace.h"
 
+#include "hw/vfio/vfio-pci.h"
+
 #define MSIX_CAP_LENGTH 12
 
 static void vfio_disable_interrupts(VFIOPCIDevice *vdev);
@@ -2310,6 +2312,18 @@ static void vfio_unregister_req_notifier(VFIOPCIDevice *vdev)
     event_notifier_cleanup(&vdev->req_notifier);
 
     vdev->req_enabled = false;
+}
+
+VFIOGroup *vfio_pci_device_group(PCIDevice *pdev)
+{
+    VFIOPCIDevice *vdev;
+
+    if (!object_dynamic_cast(OBJECT(pdev), "vfio-pci")) {
+        return NULL;
+    }
+
+    vdev = DO_UPCAST(VFIOPCIDevice, pdev, pdev);
+    return vdev->vbasedev.group;
 }
 
 static int vfio_initfn(PCIDevice *pdev)
