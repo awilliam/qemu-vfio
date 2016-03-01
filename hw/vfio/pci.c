@@ -2100,6 +2100,66 @@ int vfio_populate_vga(VFIOPCIDevice *vdev)
     return 0;
 }
 
+static int vfio_populate_dev_regions(VFIOPCIDevice *vdev)
+{
+    VFIODevice *vbasedev = &vdev->vbasedev;
+    struct vfio_region_info *reg_info;
+    int i, ret;
+
+    if (vbasedev->num_regions > VFIO_PCI_NUM_REGIONS) {
+        for (i = VFIO_PCI_NUM_REGIONS; i < vbasedev->num_regions; i++) {
+            struct vfio_info_cap_header *hdr;
+            struct vfio_region_info_cap_type *type;
+
+            ret = vfio_get_region_info(vbasedev, i, &reg_info);
+            if (ret) {
+                continue;
+            }
+
+            hdr = vfio_get_region_info_cap(reg_info, VFIO_REGION_INFO_CAP_TYPE);
+            if (!hdr) {
+                g_free(reg_info);
+                continue;
+            }
+
+            type = container_of(hdr, struct vfio_region_info_cap_type, header);
+
+            trace_vfio_populate_dev_region(vdev->vbasedev.name, i,
+                                           type->type, type->subtype);
+
+            if (type->type ==
+                (VFIO_REGION_TYPE_PCI_VENDOR_TYPE | PCI_VENDOR_ID_INTEL) &&
+                type->subtype == VFIO_REGION_SUBTYPE_INTEL_IGD_OPREGION) {
+
+                ret = vfio_pci_igd_opregion_init(vdev, reg_info);
+                if (ret) {
+                    return ret;
+                }
+            } else if (type->type ==
+                (VFIO_REGION_TYPE_PCI_VENDOR_TYPE | PCI_VENDOR_ID_INTEL) &&
+                type->subtype == VFIO_REGION_SUBTYPE_INTEL_IGD_HOST_CFG) {
+
+                ret = vfio_pci_igd_host_init(vdev, reg_info);
+                if (ret) {
+                    return ret;
+                }
+            } else if (type->type ==
+                (VFIO_REGION_TYPE_PCI_VENDOR_TYPE | PCI_VENDOR_ID_INTEL) &&
+                type->subtype == VFIO_REGION_SUBTYPE_INTEL_IGD_LPC_CFG) {
+
+                ret = vfio_pci_igd_lpc_init(vdev, reg_info);
+                if (ret) {
+                    return ret;
+                }
+            }
+
+            g_free(reg_info);
+        }
+    }
+
+    return 0;
+}
+
 static int vfio_populate_device(VFIOPCIDevice *vdev)
 {
     VFIODevice *vbasedev = &vdev->vbasedev;
@@ -2580,6 +2640,11 @@ static int vfio_initfn(PCIDevice *pdev)
         }
     }
 
+    ret = vfio_populate_dev_regions(vdev);
+    if (ret) {
+        goto out_teardown;
+    }
+
     vfio_register_err_notifier(vdev);
     vfio_register_req_notifier(vdev);
     vfio_setup_resetfn_quirk(vdev);
@@ -2602,6 +2667,7 @@ static void vfio_instance_finalize(Object *obj)
     vfio_bars_finalize(vdev);
     g_free(vdev->emulated_config_bits);
     g_free(vdev->rom);
+    g_free(vdev->igd_opregion);
     vfio_put_device(vdev);
     vfio_put_group(group);
 }
@@ -2680,12 +2746,14 @@ static Property vfio_pci_dev_properties[] = {
     DEFINE_PROP_BOOL("x-no-kvm-intx", VFIOPCIDevice, no_kvm_intx, false),
     DEFINE_PROP_BOOL("x-no-kvm-msi", VFIOPCIDevice, no_kvm_msi, false),
     DEFINE_PROP_BOOL("x-no-kvm-msix", VFIOPCIDevice, no_kvm_msix, false),
+    DEFINE_PROP_BOOL("x-no-auto-vga", VFIOPCIDevice, no_auto_vga, false),
     DEFINE_PROP_UINT32("x-pci-vendor-id", VFIOPCIDevice, vendor_id, PCI_ANY_ID),
     DEFINE_PROP_UINT32("x-pci-device-id", VFIOPCIDevice, device_id, PCI_ANY_ID),
     DEFINE_PROP_UINT32("x-pci-sub-vendor-id", VFIOPCIDevice,
                        sub_vendor_id, PCI_ANY_ID),
     DEFINE_PROP_UINT32("x-pci-sub-device-id", VFIOPCIDevice,
                        sub_device_id, PCI_ANY_ID),
+    DEFINE_PROP_UINT32("x-igd-gms", VFIOPCIDevice, igd_gms, 0),
     /*
      * TODO - support passed fds... is this necessary?
      * DEFINE_PROP_STRING("vfiofd", VFIOPCIDevice, vfiofd_name),

@@ -146,6 +146,8 @@ int vfio_get_device(VFIOGroup *group, const char *name,
                     VFIODevice *vbasedev);
 int vfio_get_region_info(VFIODevice *vbasedev, int index,
                          struct vfio_region_info **info);
+struct vfio_info_cap_header *
+    vfio_get_region_info_cap(struct vfio_region_info *info, uint16_t id);
 
 extern const MemoryRegionOps vfio_region_ops;
 extern QLIST_HEAD(vfio_group_head, VFIOGroup) vfio_group_list;

@@ -1673,6 +1673,7 @@ vfio_pci_hot_reset_dep_devices(int domain, int bus, int slot, int function, int 
 vfio_pci_hot_reset_result(const char *name, const char *result) "%s hot reset: %s"
 vfio_populate_device_config(const char *name, unsigned long size, unsigned long offset, unsigned long flags) "Device %s config:\n  size: 0x%lx, offset: 0x%lx, flags: 0x%lx"
 vfio_populate_device_get_irq_info_failure(void) "VFIO_DEVICE_GET_IRQ_INFO failure: %m"
+vfio_populate_dev_region(const char *name, int index, uint32_t type, uint32_t subtype) "%s index %d, %08x/%0x8"
 vfio_initfn(const char *name, int group_id) " (%s) group %d"
 vfio_pci_reset(const char *name) " (%s)"
 vfio_pci_reset_flr(const char *name) "%s FLR/VFIO_DEVICE_RESET"
@@ -1711,7 +1712,11 @@ vfio_quirk_ati_bonaire_reset_no_smc(const char *name) "%s"
 vfio_quirk_ati_bonaire_reset_timeout(const char *name) "%s"
 vfio_quirk_ati_bonaire_reset_done(const char *name) "%s"
 vfio_quirk_ati_bonaire_reset(const char *name) "%s"
-
+vfio_pci_igd_bar4_write(const char *name, uint32_t index, uint32_t data, uint32_t base) "%s [%03x] %08x -> %08x"
+vfio_pci_igd_bdsm_enabled(const char *name, int size) "%s %dMB"
+vfio_pci_igd_opregion_enabled(const char *name) "%s"
+vfio_pci_igd_host_bridge_enabled(const char *name) "%s"
+vfio_pci_igd_lpc_bridge_enabled(const char *name) "%s"
 
 # hw/vfio/vfio-common.c
 vfio_region_write(const char *name, int index, uint64_t addr, uint64_t data, unsigned size) " (%s:region%d+0x%"PRIx64", 0x%"PRIx64 ", %d)"

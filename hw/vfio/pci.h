@@ -115,6 +115,7 @@ typedef struct VFIOPCIDevice {
     int interrupt; /* Current interrupt type */
     VFIOBAR bars[PCI_NUM_REGIONS - 1]; /* No ROM */
     VFIOVGA *vga; /* 0xa0000, 0x3b0, 0x3c0 */
+    void *igd_opregion;
     PCIHostDeviceAddress host;
     EventNotifier err_notifier;
     EventNotifier req_notifier;
@@ -129,6 +130,7 @@ typedef struct VFIOPCIDevice {
 #define VFIO_FEATURE_ENABLE_REQ_BIT 1
 #define VFIO_FEATURE_ENABLE_REQ (1 << VFIO_FEATURE_ENABLE_REQ_BIT)
     int32_t bootindex;
+    uint32_t igd_gms;
     uint8_t pm_cap;
     bool has_vga;
     bool pci_aer;
@@ -139,6 +141,7 @@ typedef struct VFIOPCIDevice {
     bool no_kvm_intx;
     bool no_kvm_msi;
     bool no_kvm_msix;
+    bool no_auto_vga;
 } VFIOPCIDevice;
 
 uint32_t vfio_pci_read_config(PCIDevice *pdev, uint32_t addr, int len);
@@ -159,4 +162,10 @@ void vfio_setup_resetfn_quirk(VFIOPCIDevice *vdev);
 
 int vfio_populate_vga(VFIOPCIDevice *vdev);
 
+int vfio_pci_igd_opregion_init(VFIOPCIDevice *vdev,
+                               struct vfio_region_info *region);
+int vfio_pci_igd_host_init(VFIOPCIDevice *vdev,
+                           struct vfio_region_info *region);
+int vfio_pci_igd_lpc_init(VFIOPCIDevice *vdev,
+                           struct vfio_region_info *region);
 #endif /* HW_VFIO_VFIO_PCI_H */
