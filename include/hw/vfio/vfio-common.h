@@ -25,6 +25,7 @@
 #include "exec/memory.h"
 #include "qemu/queue.h"
 #include "qemu/notify.h"
+#include <linux/vfio.h>
 
 /*#define DEBUG_VFIO*/
 #ifdef DEBUG_VFIO
@@ -134,6 +135,8 @@ VFIOGroup *vfio_get_group(int groupid, AddressSpace *as);
 void vfio_put_group(VFIOGroup *group);
 int vfio_get_device(VFIOGroup *group, const char *name,
                     VFIODevice *vbasedev);
+int vfio_get_region_info(VFIODevice *vbasedev, int index,
+                         struct vfio_region_info **info);
 
 extern const MemoryRegionOps vfio_region_ops;
 extern QLIST_HEAD(vfio_group_head, VFIOGroup) vfio_group_list;
